@@ -562,6 +562,8 @@ echo "Starting live proxy health check (Ctrl+C to stop)..."
 
 ############################################
 # 13. Live proxy health check loop
+#     (et MAJ de /root/proxies.txt : on garde
+#      uniquement les proxies STATUS OK)
 ############################################
 
 while true; do
@@ -579,7 +581,9 @@ while true; do
     OK_COUNT=0
     FAIL_COUNT=0
     FAILED_LIST=""
+    TMP_HEALTH=$(mktemp)   # nouvelle liste filtrée
 
+    # Lire chaque proxy : HOST:PORT:USER:PASS
     while IFS=':' read -r HOST PORT USER PASS; do
         [ -z "$HOST" ] && continue
 
@@ -589,15 +593,26 @@ while true; do
             PROXY_URL="http://${HOST}:${PORT}"
         fi
 
+        # Test comme un client externe (Google)
         if curl -sS --max-time "$HEALTH_MAX_TIME" -x "$PROXY_URL" https://www.google.com >/dev/null 2>&1; then
             echo -e "${HOST}:${PORT} -> ${GREEN}STATUS OK !${RESET}"
             OK_COUNT=$((OK_COUNT + 1))
+            # On réécrit le proxy dans la NOUVELLE liste
+            if [ -n "$USER" ] && [ -n "$PASS" ]; then
+                echo "${HOST}:${PORT}:${USER}:${PASS}" >>"$TMP_HEALTH"
+            else
+                echo "${HOST}:${PORT}" >>"$TMP_HEALTH"
+            fi
         else
             echo -e "${HOST}:${PORT} -> ${RED}STATUS FAIL${RESET}"
             FAIL_COUNT=$((FAIL_COUNT + 1))
             FAILED_LIST+="${HOST}:${PORT}\n"
+            # On NE l’écrit PAS dans TMP_HEALTH → supprimé
         fi
     done < "$PROXY_LIST_FILE"
+
+    # Remplacer l’ancienne liste par la nouvelle filtrée
+    mv "$TMP_HEALTH" "$PROXY_LIST_FILE"
 
     TOTAL=$((OK_COUNT + FAIL_COUNT))
 
@@ -609,7 +624,7 @@ while true; do
 
     if [ "$FAIL_COUNT" -gt 0 ]; then
         echo
-        echo -e "${RED}Failed proxies list:${RESET}"
+        echo -e "${RED}Failed proxies REMOVED from list:${RESET}"
         printf '%b' "$FAILED_LIST"
         echo
     fi
