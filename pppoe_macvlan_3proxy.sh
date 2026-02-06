@@ -458,8 +458,8 @@ while IFS=':' read -r HOST PORT USER PASS; do
         PROXY_URL="http://${HOST}:${PORT}"
     fi
 
-    # Test through api.ipify.org (returned IP must match HOST)
-    PUBLIC_IP=$(curl -sS --max-time 10 -x "$PROXY_URL" https://api.ipify.org 2>/dev/null || true)
+    # Test through ipv4.icanhazip.com (returned IP must match HOST)
+    PUBLIC_IP=$(curl -sS --max-time 10 -x "$PROXY_URL" https://ipv4.icanhazip.com 2>/dev/null | tr -d '\r\n' || true)
 
     if [ -n "$PUBLIC_IP" ] && [ "$PUBLIC_IP" = "$HOST" ]; then
         # Proxy is good -> keep it in the FINAL file
