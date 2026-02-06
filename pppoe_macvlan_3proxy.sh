@@ -84,11 +84,12 @@ echo
 # Physical WAN interface
 WAN_IF="ens160"
 
-# Single 3proxy instance, single listening port
-BASE_PORT=60000          # every proxy will be IP_PPP:60000
+# 3proxy instances (multi-port)
+BASE_PORT1=30000          # Instance 1 base port
+BASE_PORT2=60000          # Instance 2 base port
+MAX_PER_INSTANCE=1000     # Max proxies on instance 1 (and 2)
 
-# Parallel PPPoE start
-PARALLEL_START=500       # Number of PPP sessions to start before short pause
+PARALLEL_START=500        # Number of PPP sessions to start before short pause
 
 # Routing table base ID
 TABLE_BASE=9000
@@ -102,25 +103,23 @@ PROXY_LIST_RAW="/root/proxies_raw.txt"   # internal raw list (for generation & t
 PROXY_LIST_FILE="/root/proxies.txt"      # final public list (served on port 1991)
 
 THREEPROXY_BIN="/usr/local/bin/3proxy"
-THREEPROXY_CFG="/usr/local/etc/3proxy/3proxy.cfg"
+THREEPROXY_CFG1="/usr/local/etc/3proxy/3proxy1.cfg"
+THREEPROXY_CFG2="/usr/local/etc/3proxy/3proxy2.cfg"
 
-# (Conservé et corrigé même si pas utilisé, pour d'autres scripts éventuels)
-# Map proxy TCP port -> PPP index (pppX) – version corrigée
+# Map proxy TCP port -> PPP index (pppX)  **CORRIGÉ**
 get_ppp_index_from_port() {
     local port="$1"
 
-    local BASE_PORT1=30000
-    local BASE_PORT2=60000
-    local MAX_PER_INSTANCE=1000
-
     # First 3proxy instance ports: BASE_PORT1 .. BASE_PORT1+MAX_PER_INSTANCE-1
     if (( port >= BASE_PORT1 && port < BASE_PORT1 + MAX_PER_INSTANCE )); then
+        # ppp0 .. ppp(MAX_PER_INSTANCE-1)
         echo $(( port - BASE_PORT1 ))
         return 0
     fi
 
     # Second 3proxy instance ports: BASE_PORT2 .. BASE_PORT2+MAX_PER_INSTANCE-1
     if (( port >= BASE_PORT2 && port < BASE_PORT2 + MAX_PER_INSTANCE )); then
+        # pppMAX_PER_INSTANCE .. ppp(2*MAX_PER_INSTANCE-1)
         echo $(( port - BASE_PORT2 + MAX_PER_INSTANCE ))
         return 0
     fi
@@ -186,25 +185,38 @@ for f in /etc/ppp/chap-secrets /etc/ppp/pap-secrets; do
 done
 
 mkdir -p /etc/ppp/peers
-mkdir -p "$(dirname "$THREEPROXY_CFG")"
+mkdir -p "$(dirname "$THREEPROXY_CFG1")"
 mkdir -p /var/log/3proxy
 
 ############################################
-# 6. Prepare 3proxy config (single instance)
+# 6. Prepare 3proxy configs (two instances)
 ############################################
 
-cat >"$THREEPROXY_CFG" <<'EOF'
+cat >"$THREEPROXY_CFG1" <<'EOF1'
 daemon
 maxconn 15000
 nserver 81.192.17.62
 nserver 8.8.8.8
 nscache 65536
-log /var/log/3proxy/log.log D
+log /var/log/3proxy/log1.log D
 logformat "L%Y-%m-%d %H:%M:%S %E %U %C:%c %R:%r %O %I %h %T"
 timeouts 1 5 30 60 180 1000 15 60
 auth none
 allow *
-EOF
+EOF1
+
+cat >"$THREEPROXY_CFG2" <<'EOF2'
+daemon
+maxconn 15000
+nserver 81.192.17.62
+nserver 8.8.8.8
+nscache 65536
+log /var/log/3proxy/log2.log D
+logformat "L%Y-%m-%d %H:%M:%S %E %U %C:%c %R:%r %O %I %h %T"
+timeouts 1 5 30 60 180 1000 15 60
+auth none
+allow *
+EOF2
 
 ############################################
 # 7. Phase 1 - Create PPPoE sessions in parallel
@@ -349,13 +361,19 @@ for i in $(seq 0 $((COUNT - 1))); do
     fi
 
     ########################################
-    # 3proxy mapping for this PPP (single port 60000)
+    # 3proxy mapping for this PPP (multi-port)
     ########################################
 
-    PORT=$BASE_PORT   # 60000 pour tous
-
-    # 3proxy : écoute et sortie par IP de la PPP
-    echo "proxy -a -p${PORT} -i${IP_PPP} -e${IP_PPP}" >>"$THREEPROXY_CFG"
+    if [ "$i" -lt "$MAX_PER_INSTANCE" ]; then
+        # Instance 1
+        PORT=$((BASE_PORT1 + i))
+        echo "proxy -a -p${PORT} -i0.0.0.0 -e${IP_PPP}" >>"$THREEPROXY_CFG1"
+    else
+        # Instance 2
+        INDEX2=$((i - MAX_PER_INSTANCE))
+        PORT=$((BASE_PORT2 + INDEX2))
+        echo "proxy -a -p${PORT} -i0.0.0.0 -e${IP_PPP}" >>"$THREEPROXY_CFG2"
+    fi
 
     # Open the port in firewall if iptables is available
     if command -v iptables >/dev/null 2>&1; then
@@ -394,15 +412,20 @@ else
 fi
 
 ############################################
-# 11. Start 3proxy instance
+# 11. Start 3proxy instances
 ############################################
 
 echo
-echo "Starting 3proxy with generated configuration..."
+echo "Starting 3proxy with generated configurations..."
 
-if [ -s "$THREEPROXY_CFG" ]; then
-    "$THREEPROXY_BIN" "$THREEPROXY_CFG" &
-    echo " -> 3proxy started (all proxies on port ${BASE_PORT})"
+if [ -s "$THREEPROXY_CFG1" ]; then
+    "$THREEPROXY_BIN" "$THREEPROXY_CFG1" &
+    echo " -> 3proxy instance 1 started (ports from ${BASE_PORT1})"
+fi
+
+if [ -s "$THREEPROXY_CFG2" ]; then
+    "$THREEPROXY_BIN" "$THREEPROXY_CFG2" &
+    echo " -> 3proxy instance 2 started (ports from ${BASE_PORT2})"
 fi
 
 echo
