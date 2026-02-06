@@ -89,7 +89,7 @@ BASE_PORT1=30000          # Instance 1 base port
 BASE_PORT2=60000          # Instance 2 base port
 MAX_PER_INSTANCE=1000     # Max proxies on instance 1 (and 2)
 
-PARALLEL_START=500        # Number of PPP sessions to start before short pause
+PARALLEL_START=50         # Number of PPP sessions to start before short pause
 
 # Routing table base ID
 TABLE_BASE=9000
@@ -275,6 +275,9 @@ EOF
         echo " -> $((i + 1)) sessions started, taking a short break..."
         sleep 1
     fi
+
+    # petite pause entre chaque PPP pour soulager le FAI
+    sleep 0.1
 done
 
 ############################################
@@ -318,13 +321,15 @@ for i in $(seq 0 $((COUNT - 1))); do
 
     echo " -> Proxy READY <<< ${PPP_IF} with IP ${IP_PPP}"
 
-    # Quick connectivity test on this PPP (optional but recommended)
-    if command -v curl >/dev/null 2>&1; then
-        TEST_IP=$(curl -s --interface "$PPP_IF" --max-time 5 https://api.ipify.org 2>/dev/null || true)
-        if [ -z "$TEST_IP" ]; then
-            echo "!!! Skipping ${PPP_IF} (${IP_PPP}) - no internet connectivity"
-            # Do NOT create proxy or routes for this PPP
-            continue
+    ########################################
+    # Quick connectivity test with ping (no skip)
+    ########################################
+    if command -v ping >/dev/null 2>&1; then
+        if ping -I "$PPP_IF" -c 2 -W 3 8.8.8.8 >/dev/null 2>&1; then
+            echo "    Connectivity OK on ${PPP_IF} (ping 8.8.8.8)"
+        else
+            echo "!!! Warning: connectivity test FAILED on ${PPP_IF} (${IP_PPP})"
+            echo "    -> Keeping this session anyway (it will be tested as proxy later)."
         fi
     fi
 
