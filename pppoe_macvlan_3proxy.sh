@@ -57,6 +57,33 @@ rm -f "$TMP_OUT"
 echo
 
 ############################################
+# Helper: generic progress bar (white)
+############################################
+progress_bar() {
+    local current="$1"
+    local total="$2"
+    local label="$3"
+    local width=40
+
+    if [ "$total" -le 0 ]; then
+        total=1
+    fi
+
+    local percent=$(( current * 100 / total ))
+    [ "$percent" -gt 100 ] && percent=100
+    local filled=$(( current * width / total ))
+    local empty=$(( width - filled ))
+
+    local bar_filled
+    local bar_empty
+    bar_filled=$(printf "%*s" "$filled" "" | tr ' ' '#')
+    bar_empty=$(printf "%*s" "$empty" "" | tr ' ' ' ')
+
+    # blanc (ou couleur par défaut du terminal)
+    printf "\r%s [%-*s] %3d%%" "$label" "$width" "${bar_filled}${bar_empty}" "$percent"
+}
+
+############################################
 # 1. Ask how many proxies to generate
 ############################################
 
@@ -227,12 +254,13 @@ echo
 echo "Phase 1: creating PPPoE sessions..."
 echo
 
-for i in $(seq 0 $((COUNT - 1))); do
-    echo "# Proxy number $i starting..."
+PH1_DONE=0
 
+for i in $(seq 0 $((COUNT - 1))); do
     MACVLAN_IF="macvlan$i"
 
     if ! ip link add link "$WAN_IF" name "$MACVLAN_IF" type macvlan mode bridge 2>/dev/null; then
+        echo
         echo "!!! Failed to create ${MACVLAN_IF}"
         continue
     fi
@@ -272,21 +300,27 @@ EOF
 
     # small pause every PARALLEL_START sessions to avoid overloading everything at once
     if (((i + 1) % PARALLEL_START == 0)); then
-        echo " -> $((i + 1)) sessions started, taking a short break..."
         sleep 1
     fi
 
     # petite pause entre chaque PPP pour soulager le FAI
     sleep 0.1
+
+    PH1_DONE=$((PH1_DONE + 1))
+    progress_bar "$PH1_DONE" "$COUNT" "Phase 1"
 done
+
+echo    # fin de la barre
+echo
 
 ############################################
 # 8. Phase 2 - Wait for PPP + routes + 3proxy entries
 ############################################
 
-echo
 echo "Phase 2: configuring routes and proxies..."
 echo
+
+PH2_DONE=0
 
 for i in $(seq 0 $((COUNT - 1))); do
     PPP_IF="ppp$i"
@@ -300,6 +334,7 @@ for i in $(seq 0 $((COUNT - 1))); do
     done
 
     if ! ip addr show "$PPP_IF" >/dev/null 2>&1; then
+        echo
         echo "!!! PPPoE failed on ${MACVLAN_IF} (${PPP_IF} not created)"
         continue
     fi
@@ -315,19 +350,17 @@ for i in $(seq 0 $((COUNT - 1))); do
     done
 
     if [ -z "$IP_PPP" ]; then
+        echo
         echo "!!! Unable to get IP on ${PPP_IF} (timeout)"
         continue
     fi
 
-    echo " -> Proxy READY <<< ${PPP_IF} with IP ${IP_PPP}"
-
     ########################################
-    # Quick connectivity test with ping (no skip)
+    # Quick connectivity test with ping
     ########################################
     if command -v ping >/dev/null 2>&1; then
-        if ping -I "$PPP_IF" -c 2 -W 3 8.8.8.8 >/dev/null 2>&1; then
-            echo "    Connectivity OK on ${PPP_IF} (ping 8.8.8.8)"
-        else
+        if ! ping -I "$PPP_IF" -c 2 -W 3 8.8.8.8 >/dev/null 2>&1; then
+            echo
             echo "!!! Warning: connectivity test FAILED on ${PPP_IF} (${IP_PPP})"
             echo "    -> Keeping this session anyway (it will be tested as proxy later)."
         fi
@@ -349,18 +382,21 @@ for i in $(seq 0 $((COUNT - 1))); do
 
     # 3) Add host route for the PPP IP in its table
     if ! ip route add "$IP_PPP"/32 dev "$PPP_IF" table "$TABLE_ID" >/dev/null 2>&1; then
+        echo
         echo "!!! Failed to add host route ${IP_PPP}/32 via ${PPP_IF} (interface probably went down)"
         continue
     fi
 
     # 4) Add default route via this PPP interface
     if ! ip route add default dev "$PPP_IF" table "$TABLE_ID" >/dev/null 2>&1; then
+        echo
         echo "!!! Failed to add default route via ${PPP_IF}"
         continue
     fi
 
     # 5) Add a single routing rule for this IP to this table
     if ! ip rule add from "$IP_PPP" table "$TABLE_ID" priority $((9000 + i)) >/dev/null 2>&1; then
+        echo
         echo "!!! Failed to add ip rule from ${IP_PPP} for table ${TABLE_ID}"
         continue
     fi
@@ -388,7 +424,13 @@ for i in $(seq 0 $((COUNT - 1))); do
 
     # Add to RAW proxy list file (login/pass fixed example)
     echo "${IP_PPP}:${PORT}:fibre123:fibrebe123" >>"$PROXY_LIST_RAW"
+
+    PH2_DONE=$((PH2_DONE + 1))
+    progress_bar "$PH2_DONE" "$COUNT" "Phase 2"
 done
+
+echo    # fin de la barre
+echo
 
 ############################################
 # 9. Optional: adjust default route via ppp0
