@@ -3,8 +3,11 @@
 set -e
 
 ############################################
-# Couleurs
+# 0. Licence check with progress bar
 ############################################
+
+BAR_WIDTH=30
+BAR_CHAR="█"
 
 GREEN="\e[32m"
 RED="\e[31m"
@@ -13,17 +16,7 @@ YELLOW="\e[33m"
 ORANGE="\e[38;5;208m"
 PINK="\e[35m"
 BLUE="\e[34m"
-
-# Style des barres de progression (phases 1 & 2)
-PBAR_WIDTH=40
-PBAR_CHAR="█"
-
-############################################
-# 0. Licence check with progress bar (jaune)
-############################################
-
-LIC_BAR_WIDTH=40
-LIC_CHAR="█"
+SKY_BLUE="\e[36m"   # bleu ciel pour Phase 2
 
 TMP_OUT=$(mktemp)
 
@@ -31,25 +24,26 @@ TMP_OUT=$(mktemp)
 LIC_PID=$!
 progress=0
 
+# Ligne vide pour séparer du prompt précédent
 echo
-printf "${YELLOW}Checking licence... %3d%% [" 0
-printf "%*s" "$LIC_BAR_WIDTH" ""
-printf "]${RESET}"
+
+# Affichage initial
+printf "${YELLOW}Checking licence... 0%% [%-*s]${RESET}" "$BAR_WIDTH" ""
 
 while kill -0 "$LIC_PID" 2>/dev/null; do
-    if [ "$progress" -lt "$LIC_BAR_WIDTH" ]; then
+    if [ "$progress" -lt "$BAR_WIDTH" ]; then
         progress=$((progress + 1))
     fi
 
-    percent=$(( progress * 100 / LIC_BAR_WIDTH ))
+    percent=$(( progress * 100 / BAR_WIDTH ))
     [ "$percent" -gt 100 ] && percent=100
 
     filled=$progress
-    empty=$(( LIC_BAR_WIDTH - filled ))
+    empty=$((BAR_WIDTH - filled))
 
     printf "\r${YELLOW}Checking licence... %3d%% [" "$percent"
-    printf "%0.s$LIC_CHAR" $(seq 1 "$filled")
-    printf "%0.s "        $(seq 1 "$empty")
+    printf "%0.s${BAR_CHAR}" $(seq 1 "$filled")
+    printf "%0.s "           $(seq 1 "$empty")
     printf "]${RESET}"
 
     sleep 0.1
@@ -61,9 +55,9 @@ else
     LIC_RC=$?
 fi
 
-percent=100
-printf "\r${YELLOW}Checking licence... %3d%% [" "$percent"
-printf "%0.s$LIC_CHAR" $(seq 1 "$LIC_BAR_WIDTH")
+# Fin de la barre licence + ligne vide
+printf "\r${YELLOW}Checking licence... 100%% [" 
+printf "%0.s${BAR_CHAR}" $(seq 1 "$BAR_WIDTH")
 printf "]${RESET}\n\n"
 
 if [ "$LIC_RC" -ne 0 ]; then
@@ -76,17 +70,20 @@ fi
 rm -f "$TMP_OUT"
 
 ############################################
-# Helper: barre de progression colorée
+# Helpers
 ############################################
 
+# Progress bar (avec couleur et pourcentage)
 show_progress() {
     local current="$1"
     local total="$2"
     local label="$3"
     local color="$4"
+    local width=40
 
-    local width="$PBAR_WIDTH"
-    [ "$total" -le 0 ] && return
+    if [ "$total" -le 0 ]; then
+        return
+    fi
 
     local percent=$(( current * 100 / total ))
     [ "$percent" -gt 100 ] && percent=100
@@ -95,9 +92,9 @@ show_progress() {
     [ "$filled" -gt "$width" ] && filled="$width"
     local empty=$(( width - filled ))
 
-    printf "\r%s ${color}%3d%% [" "$label" "$percent"
-    printf "%0.s$PBAR_CHAR" $(seq 1 "$filled")
-    printf "%0.s "          $(seq 1 "$empty")
+    printf "\r%s %s%3d%% [" "$label" "$color" "$percent"
+    printf "%0.s█" $(seq 1 "$filled")
+    printf "%0.s " $(seq 1 "$empty")
     printf "]${RESET}"
 }
 
@@ -296,7 +293,6 @@ EOF
         sleep 1
     fi
 
-    # Barre verte pour la phase 1
     show_progress $((i + 1)) "$COUNT" "Phase 1 (PPPoE sessions):" "$GREEN"
 done
 echo
@@ -323,7 +319,7 @@ for i in $(seq 0 $((COUNT - 1))); do
     if ! ip addr show "$PPP_IF" >/dev/null 2>&1; then
         echo
         echo "!!! PPPoE failed on ${MACVLAN_IF} (${PPP_IF} not created)"
-        show_progress $((i + 1)) "$COUNT" "Phase 2 (routes+proxies):" "$BLUE"
+        show_progress $((i + 1)) "$COUNT" "Phase 2 (routes+proxies):" "$SKY_BLUE"
         continue
     fi
 
@@ -340,7 +336,7 @@ for i in $(seq 0 $((COUNT - 1))); do
     if [ -z "$IP_PPP" ]; then
         echo
         echo "!!! Unable to get IP on ${PPP_IF} (timeout)"
-        show_progress $((i + 1)) "$COUNT" "Phase 2 (routes+proxies):" "$BLUE"
+        show_progress $((i + 1)) "$COUNT" "Phase 2 (routes+proxies):" "$SKY_BLUE"
         continue
     fi
 
@@ -354,7 +350,7 @@ for i in $(seq 0 $((COUNT - 1))); do
     if [ "$PING_OK" -ne 1 ]; then
         echo
         echo "!!! Skipping ${PPP_IF} (${IP_PPP}) - no internet connectivity"
-        show_progress $((i + 1)) "$COUNT" "Phase 2 (routes+proxies):" "$BLUE"
+        show_progress $((i + 1)) "$COUNT" "Phase 2 (routes+proxies):" "$SKY_BLUE"
         continue
     fi
 
@@ -376,7 +372,7 @@ for i in $(seq 0 $((COUNT - 1))); do
     if ! ip route add "$IP_PPP"/32 dev "$PPP_IF" table "$TABLE_ID" >/dev/null 2>&1; then
         echo
         echo "!!! Failed to add host route ${IP_PPP}/32 via ${PPP_IF} (interface probably went down)"
-        show_progress $((i + 1)) "$COUNT" "Phase 2 (routes+proxies):" "$BLUE"
+        show_progress $((i + 1)) "$COUNT" "Phase 2 (routes+proxies):" "$SKY_BLUE"
         continue
     fi
 
@@ -384,7 +380,7 @@ for i in $(seq 0 $((COUNT - 1))); do
     if ! ip route add default dev "$PPP_IF" table "$TABLE_ID" >/dev/null 2>&1; then
         echo
         echo "!!! Failed to add default route via ${PPP_IF}"
-        show_progress $((i + 1)) "$COUNT" "Phase 2 (routes+proxies):" "$BLUE"
+        show_progress $((i + 1)) "$COUNT" "Phase 2 (routes+proxies):" "$SKY_BLUE"
         continue
     fi
 
@@ -392,7 +388,7 @@ for i in $(seq 0 $((COUNT - 1))); do
     if ! ip rule add from "$IP_PPP" table "$TABLE_ID" priority $((9000 + i)) >/dev/null 2>&1; then
         echo
         echo "!!! Failed to add ip rule from ${IP_PPP} for table ${TABLE_ID}"
-        show_progress $((i + 1)) "$COUNT" "Phase 2 (routes+proxies):" "$BLUE"
+        show_progress $((i + 1)) "$COUNT" "Phase 2 (routes+proxies):" "$SKY_BLUE"
         continue
     fi
 
@@ -420,8 +416,7 @@ for i in $(seq 0 $((COUNT - 1))); do
     # Add to RAW proxy list file (login/pass fixed example)
     echo "${IP_PPP}:${PORT}:fibre123:fibrebe123" >>"$PROXY_LIST_RAW"
 
-    # Barre bleue pour la phase 2
-    show_progress $((i + 1)) "$COUNT" "Phase 2 (routes+proxies):" "$BLUE"
+    show_progress $((i + 1)) "$COUNT" "Phase 2 (routes+proxies):" "$SKY_BLUE"
 done
 echo
 echo
