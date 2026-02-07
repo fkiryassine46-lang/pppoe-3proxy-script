@@ -3,27 +3,19 @@
 set -e
 
 ############################################
-# Couleurs
+# 0. Licence check with progress bar
 ############################################
+
+BAR_WIDTH=30
+BAR_CHAR="#"
 
 GREEN="\e[32m"
 RED="\e[31m"
 RESET="\e[0m"
-YELLOW="\e[33m"
-ORANGE="\e[38;5;208m"
-PINK="\e[35m"
-BLUE="\e[34m"
-
-# Style des barres de progression (phases 1 & 2)
-PBAR_WIDTH=40
-PBAR_CHAR="█"
-
-############################################
-# 0. Licence check with progress bar (jaune)
-############################################
-
-LIC_BAR_WIDTH=40
-LIC_CHAR="█"
+YELLOW='\e[33m'
+ORANGE='\e[38;5;208m'
+PINK='\e[35m'
+BLUE='\e[34m'
 
 TMP_OUT=$(mktemp)
 
@@ -31,27 +23,17 @@ TMP_OUT=$(mktemp)
 LIC_PID=$!
 progress=0
 
-echo
-printf "${YELLOW}Checking licence... %3d%% [" 0
-printf "%*s" "$LIC_BAR_WIDTH" ""
-printf "]${RESET}"
+printf "Checking licence... ${GREEN}[%*s]${RESET}" "$BAR_WIDTH" ""
 
 while kill -0 "$LIC_PID" 2>/dev/null; do
-    if [ "$progress" -lt "$LIC_BAR_WIDTH" ]; then
+    if [ "$progress" -lt "$BAR_WIDTH" ]; then
         progress=$((progress + 1))
     fi
 
-    percent=$(( progress * 100 / LIC_BAR_WIDTH ))
-    [ "$percent" -gt 100 ] && percent=100
+    filled=$(printf "%*s" "$progress" "" | tr ' ' "$BAR_CHAR")
+    empty=$(printf "%*s" "$((BAR_WIDTH - progress))" "")
 
-    filled=$progress
-    empty=$(( LIC_BAR_WIDTH - filled ))
-
-    printf "\r${YELLOW}Checking licence... %3d%% [" "$percent"
-    printf "%0.s$LIC_CHAR" $(seq 1 "$filled")
-    printf "%0.s "        $(seq 1 "$empty")
-    printf "]${RESET}"
-
+    printf "\rChecking licence... ${GREEN}[%s%s]${RESET}" "$filled" "$empty"
     sleep 0.1
 done
 
@@ -61,10 +43,8 @@ else
     LIC_RC=$?
 fi
 
-percent=100
-printf "\r${YELLOW}Checking licence... %3d%% [" "$percent"
-printf "%0.s$LIC_CHAR" $(seq 1 "$LIC_BAR_WIDTH")
-printf "]${RESET}\n\n"
+filled=$(printf "%*s" "$BAR_WIDTH" "" | tr ' ' "$BAR_CHAR")
+printf "\rChecking licence... ${GREEN}[%s]${RESET}\n" "$filled"
 
 if [ "$LIC_RC" -ne 0 ]; then
     echo
@@ -74,31 +54,33 @@ if [ "$LIC_RC" -ne 0 ]; then
 fi
 
 rm -f "$TMP_OUT"
+echo
 
 ############################################
-# Helper: barre de progression colorée
+# Helper: generic progress bar (white)
 ############################################
-
-show_progress() {
+progress_bar() {
     local current="$1"
     local total="$2"
     local label="$3"
-    local color="$4"
+    local width=40
 
-    local width="$PBAR_WIDTH"
-    [ "$total" -le 0 ] && return
+    if [ "$total" -le 0 ]; then
+        total=1
+    fi
 
     local percent=$(( current * 100 / total ))
     [ "$percent" -gt 100 ] && percent=100
-
     local filled=$(( current * width / total ))
-    [ "$filled" -gt "$width" ] && filled="$width"
     local empty=$(( width - filled ))
 
-    printf "\r%s ${color}%3d%% [" "$label" "$percent"
-    printf "%0.s$PBAR_CHAR" $(seq 1 "$filled")
-    printf "%0.s "          $(seq 1 "$empty")
-    printf "]${RESET}"
+    local bar_filled
+    local bar_empty
+    bar_filled=$(printf "%*s" "$filled" "" | tr ' ' '#')
+    bar_empty=$(printf "%*s" "$empty" "" | tr ' ' ' ')
+
+    # blanc (ou couleur par défaut du terminal)
+    printf "\r%s [%-*s] %3d%%" "$label" "$width" "${bar_filled}${bar_empty}" "$percent"
 }
 
 ############################################
@@ -129,12 +111,12 @@ echo
 # Physical WAN interface
 WAN_IF="ens160"
 
-# 3proxy instances
+# 3proxy instances (multi-port)
 BASE_PORT1=30000          # Instance 1 base port
 BASE_PORT2=60000          # Instance 2 base port
-MAX_PER_INSTANCE=1000     # Max proxies on instance 1
+MAX_PER_INSTANCE=1000     # Max proxies on instance 1 (and 2)
 
-PARALLEL_START=500        # PPP sessions to start before short pause
+PARALLEL_START=50         # Number of PPP sessions to start before short pause
 
 # Routing table base ID
 TABLE_BASE=9000
@@ -150,6 +132,29 @@ PROXY_LIST_FILE="/root/proxies.txt"      # final public list (served on port 199
 THREEPROXY_BIN="/usr/local/bin/3proxy"
 THREEPROXY_CFG1="/usr/local/etc/3proxy/3proxy1.cfg"
 THREEPROXY_CFG2="/usr/local/etc/3proxy/3proxy2.cfg"
+
+# Map proxy TCP port -> PPP index (pppX)  **CORRIGÉ**
+get_ppp_index_from_port() {
+    local port="$1"
+
+    # First 3proxy instance ports: BASE_PORT1 .. BASE_PORT1+MAX_PER_INSTANCE-1
+    if (( port >= BASE_PORT1 && port < BASE_PORT1 + MAX_PER_INSTANCE )); then
+        # ppp0 .. ppp(MAX_PER_INSTANCE-1)
+        echo $(( port - BASE_PORT1 ))
+        return 0
+    fi
+
+    # Second 3proxy instance ports: BASE_PORT2 .. BASE_PORT2+MAX_PER_INSTANCE-1
+    if (( port >= BASE_PORT2 && port < BASE_PORT2 + MAX_PER_INSTANCE )); then
+        # pppMAX_PER_INSTANCE .. ppp(2*MAX_PER_INSTANCE-1)
+        echo $(( port - BASE_PORT2 + MAX_PER_INSTANCE ))
+        return 0
+    fi
+
+    # Unknown / out of range
+    echo "-1"
+    return 1
+}
 
 ############################################
 # 3. Detect local IP on WAN_IF
@@ -181,8 +186,8 @@ fi
 
 echo "$(date) - Cleaning old configuration..."
 
-pkill 3proxy >/dev/null 2>&1 || true
-pkill pppd   >/dev/null 2>&1 || true
+pkill 3proxy  >/dev/null 2>&1 || true
+pkill pppd    >/dev/null 2>&1 || true
 
 # Clean old macvlan interfaces (up to COUNT + 500, just to be safe)
 MAX_CLEAN=$((COUNT + 500))
@@ -249,6 +254,8 @@ echo
 echo "Phase 1: creating PPPoE sessions..."
 echo
 
+PH1_DONE=0
+
 for i in $(seq 0 $((COUNT - 1))); do
     MACVLAN_IF="macvlan$i"
 
@@ -296,10 +303,14 @@ EOF
         sleep 1
     fi
 
-    # Barre verte pour la phase 1
-    show_progress $((i + 1)) "$COUNT" "Phase 1 (PPPoE sessions):" "$GREEN"
+    # petite pause entre chaque PPP pour soulager le FAI
+    sleep 0.1
+
+    PH1_DONE=$((PH1_DONE + 1))
+    progress_bar "$PH1_DONE" "$COUNT" "Phase 1"
 done
-echo
+
+echo    # fin de la barre
 echo
 
 ############################################
@@ -308,6 +319,8 @@ echo
 
 echo "Phase 2: configuring routes and proxies..."
 echo
+
+PH2_DONE=0
 
 for i in $(seq 0 $((COUNT - 1))); do
     PPP_IF="ppp$i"
@@ -323,7 +336,6 @@ for i in $(seq 0 $((COUNT - 1))); do
     if ! ip addr show "$PPP_IF" >/dev/null 2>&1; then
         echo
         echo "!!! PPPoE failed on ${MACVLAN_IF} (${PPP_IF} not created)"
-        show_progress $((i + 1)) "$COUNT" "Phase 2 (routes+proxies):" "$BLUE"
         continue
     fi
 
@@ -340,22 +352,18 @@ for i in $(seq 0 $((COUNT - 1))); do
     if [ -z "$IP_PPP" ]; then
         echo
         echo "!!! Unable to get IP on ${PPP_IF} (timeout)"
-        show_progress $((i + 1)) "$COUNT" "Phase 2 (routes+proxies):" "$BLUE"
         continue
     fi
 
-    # Quick connectivity test on this PPP via ping
-    PING_OK=0
+    ########################################
+    # Quick connectivity test with ping
+    ########################################
     if command -v ping >/dev/null 2>&1; then
-        if ping -c 1 -W 2 -I "$PPP_IF" 8.8.8.8 >/dev/null 2>&1; then
-            PING_OK=1
+        if ! ping -I "$PPP_IF" -c 2 -W 3 8.8.8.8 >/dev/null 2>&1; then
+            echo
+            echo "!!! Warning: connectivity test FAILED on ${PPP_IF} (${IP_PPP})"
+            echo "    -> Keeping this session anyway (it will be tested as proxy later)."
         fi
-    fi
-    if [ "$PING_OK" -ne 1 ]; then
-        echo
-        echo "!!! Skipping ${PPP_IF} (${IP_PPP}) - no internet connectivity"
-        show_progress $((i + 1)) "$COUNT" "Phase 2 (routes+proxies):" "$BLUE"
-        continue
     fi
 
     ########################################
@@ -376,7 +384,6 @@ for i in $(seq 0 $((COUNT - 1))); do
     if ! ip route add "$IP_PPP"/32 dev "$PPP_IF" table "$TABLE_ID" >/dev/null 2>&1; then
         echo
         echo "!!! Failed to add host route ${IP_PPP}/32 via ${PPP_IF} (interface probably went down)"
-        show_progress $((i + 1)) "$COUNT" "Phase 2 (routes+proxies):" "$BLUE"
         continue
     fi
 
@@ -384,7 +391,6 @@ for i in $(seq 0 $((COUNT - 1))); do
     if ! ip route add default dev "$PPP_IF" table "$TABLE_ID" >/dev/null 2>&1; then
         echo
         echo "!!! Failed to add default route via ${PPP_IF}"
-        show_progress $((i + 1)) "$COUNT" "Phase 2 (routes+proxies):" "$BLUE"
         continue
     fi
 
@@ -392,12 +398,11 @@ for i in $(seq 0 $((COUNT - 1))); do
     if ! ip rule add from "$IP_PPP" table "$TABLE_ID" priority $((9000 + i)) >/dev/null 2>&1; then
         echo
         echo "!!! Failed to add ip rule from ${IP_PPP} for table ${TABLE_ID}"
-        show_progress $((i + 1)) "$COUNT" "Phase 2 (routes+proxies):" "$BLUE"
         continue
     fi
 
     ########################################
-    # 3proxy mapping for this PPP
+    # 3proxy mapping for this PPP (multi-port)
     ########################################
 
     if [ "$i" -lt "$MAX_PER_INSTANCE" ]; then
@@ -420,10 +425,11 @@ for i in $(seq 0 $((COUNT - 1))); do
     # Add to RAW proxy list file (login/pass fixed example)
     echo "${IP_PPP}:${PORT}:fibre123:fibrebe123" >>"$PROXY_LIST_RAW"
 
-    # Barre bleue pour la phase 2
-    show_progress $((i + 1)) "$COUNT" "Phase 2 (routes+proxies):" "$BLUE"
+    PH2_DONE=$((PH2_DONE + 1))
+    progress_bar "$PH2_DONE" "$COUNT" "Phase 2"
 done
-echo
+
+echo    # fin de la barre
 echo
 
 ############################################
