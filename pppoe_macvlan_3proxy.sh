@@ -1,108 +1,89 @@
 #!/bin/bash
 
 set -e
-#script complet mlih
+
 ############################################
 # 0. Licence check with progress bar
 ############################################
 
-BAR_WIDTH=30   # (gardé mais plus vraiment utilisé pour la licence)
+BAR_WIDTH=30
+BAR_CHAR="█"
 
 GREEN="\e[32m"
 RED="\e[31m"
 RESET="\e[0m"
-YELLOW='\e[33m'
-ORANGE='\e[38;5;208m'
-PINK='\e[35m'
-BLUE='\e[34m'
-
-# couleurs spéciales pour les barres
-BAR_GREEN="\e[92m"   # vert clair
-BAR_BLUE="\e[94m"    # bleu clair
-BAR_YELLOW="\e[93m"  # jaune clair
+YELLOW="\e[33m"
+ORANGE="\e[38;5;208m"
+PINK="\e[35m"
+BLUE="\e[34m"
+WHITE="\e[37m"
 
 TMP_OUT=$(mktemp)
 
 /usr/local/bin/check_license.sh --no-reboot >"$TMP_OUT" 2>&1 &
 LIC_PID=$!
+progress=0
 
-# ---- nouvelle barre de licence style ███ comme les autres ----
-LIC_WIDTH=40
-LIC_PROGRESS=0
-BLOCK_CHAR="█"
-
-# affichage initial : 0% [                ]
-printf "${BAR_YELLOW}Checking licence...%3d%% [" 0
-for ((j=0; j<LIC_WIDTH; j++)); do
-    printf " "
-done
-printf "]${RESET}"
+# barre de progression licence (jaune)
+printf "${YELLOW}Checking licence...%s${RESET}" ""
 
 while kill -0 "$LIC_PID" 2>/dev/null; do
-    if [ "$LIC_PROGRESS" -lt "$LIC_WIDTH" ]; then
-        LIC_PROGRESS=$((LIC_PROGRESS + 1))
+    if [ "$progress" -lt "$BAR_WIDTH" ]; then
+        progress=$((progress + 1))
     fi
 
-    percent=$(( LIC_PROGRESS * 100 / LIC_WIDTH ))
+    percent=$(( progress * 100 / BAR_WIDTH ))
     [ "$percent" -gt 100 ] && percent=100
 
-    filled=$LIC_PROGRESS
-    [ "$filled" -gt "$LIC_WIDTH" ] && filled="$LIC_WIDTH"
-    empty=$(( LIC_WIDTH - filled ))
+    filled=$progress
+    empty=$((BAR_WIDTH - filled))
 
-    # réécrire toute la ligne
-    printf "\r${BAR_YELLOW}Checking licence...%3d%% [" "$percent"
-
-    # partie remplie (blocs jaunes)
-    for ((j=0; j<filled; j++)); do
-        printf "%b" "${BAR_YELLOW}${BLOCK_CHAR}${RESET}"
-    done
-    # partie vide
-    for ((j=0; j<empty; j++)); do
-        printf " "
-    done
-
+    printf "\r${YELLOW}Checking licence... %3d%% [" "$percent"
+    printf "%0.s${BAR_CHAR}" $(seq 1 "$filled")
+    printf "%0.s "           $(seq 1 "$empty")
     printf "]${RESET}"
+
     sleep 0.1
 done
 
-# récupérer le code retour du script de licence
 if wait "$LIC_PID"; then
     LIC_RC=0
 else
     LIC_RC=$?
 fi
 
-# forcer 100% + barre pleine
-printf "\r${BAR_YELLOW}Checking licence...%3d%% [" 100
-for ((j=0; j<LIC_WIDTH; j++)); do
-    printf "%b" "${BAR_YELLOW}${BLOCK_CHAR}${RESET}"
-done
+# affichage final à 100 %
+filled=$BAR_WIDTH
+empty=0
+printf "\r${YELLOW}Checking licence... 100%% [" 
+printf "%0.s${BAR_CHAR}" $(seq 1 "$filled")
+printf "%0.s "           $(seq 1 "$empty")
 printf "]${RESET}\n"
 
 if [ "$LIC_RC" -ne 0 ]; then
     echo
     cat "$TMP_OUT"
     rm -f "$TMP_OUT"
+    echo              # ligne vide avant de quitter
     exit "$LIC_RC"
 fi
 
 rm -f "$TMP_OUT"
-echo
+echo                  # 1ère ligne vide
+echo                  # 2ème ligne vide
 
 ############################################
 # Helpers
 ############################################
 
-# Barre de progression style "Loading..." avec couleur
-# usage: show_progress <current> <total> "<label>" <color>
+# Progress bar (coloured blocks + coloured percentage)
+# $1 = current, $2 = total, $3 = label, $4 = colour code
 show_progress() {
     local current="$1"
     local total="$2"
     local label="$3"
     local color="$4"
     local width=40
-    local block="█"
 
     if [ "$total" -le 0 ]; then
         return
@@ -115,29 +96,10 @@ show_progress() {
     [ "$filled" -gt "$width" ] && filled="$width"
     local empty=$(( width - filled ))
 
-    # label + pourcentage coloré
-    printf "\r%s %b%3d%%%b [" "$label" "$color" "$percent" "$RESET"
-
-    # partie remplie colorée
-    local j
-    for ((j=0; j<filled; j++)); do
-        printf "%b" "${color}${block}${RESET}"
-    done
-
-    # partie vide
-    for ((j=0; j<empty; j++)); do
-        printf " "
-    done
-
-    printf "]"
-}
-
-show_progress_phase1() {
-    show_progress "$1" "$2" "$3" "$BAR_GREEN"   # barre + % en vert
-}
-
-show_progress_phase2() {
-    show_progress "$1" "$2" "$3" "$BAR_BLUE"    # barre + % en bleu
+    printf "\r%s ${color}%3d%% [" "$label" "$percent"
+    printf "%0.s${BAR_CHAR}" $(seq 1 "$filled")
+    printf "%0.s "           $(seq 1 "$empty")
+    printf "]${RESET}"
 }
 
 ############################################
@@ -191,11 +153,11 @@ THREEPROXY_CFG1="/usr/local/etc/3proxy/3proxy1.cfg"
 THREEPROXY_CFG2="/usr/local/etc/3proxy/3proxy2.cfg"
 
 # Performance tuning
-CHECK_MAX_TIME=7          # Timeout for initial check (ipv4.icanhazip.com)
-CHECK_PARALLEL_JOBS=50    # Parallel curl jobs during initial check
-HEALTH_MAX_TIME=15        # Timeout for live health check (Google)
+CHECK_MAX_TIME=7           # Timeout for initial check (ipv4.icanhazip.com)
+CHECK_PARALLEL_JOBS=15     # Parallel curl jobs during initial check
+HEALTH_MAX_TIME=15         # Timeout for live health check (Google)
 
-# Map proxy TCP port -> PPP index (pppX) (garde pour debug/usage futur)
+# Map proxy TCP port -> PPP index (pppX) (kept for debug/future use)
 get_ppp_index_from_port() {
     local port="$1"
 
@@ -361,7 +323,8 @@ EOF
         sleep 1
     fi
 
-    show_progress_phase1 $((i + 1)) "$COUNT" "Phase 1 (PPPoE sessions):"
+    # barre verte pour phase 1
+    show_progress $((i + 1)) "$COUNT" "Phase 1 (PPPoE sessions):" "$GREEN"
 done
 echo
 echo
@@ -387,7 +350,7 @@ for i in $(seq 0 $((COUNT - 1))); do
     if ! ip addr show "$PPP_IF" >/dev/null 2>&1; then
         echo
         echo "!!! PPPoE failed on ${MACVLAN_IF} (${PPP_IF} not created)"
-        show_progress_phase2 $((i + 1)) "$COUNT" "Phase 2 (routes+proxies):"
+        show_progress $((i + 1)) "$COUNT" "Phase 2 (routes+proxies):" "$BLUE"
         continue
     fi
 
@@ -404,7 +367,7 @@ for i in $(seq 0 $((COUNT - 1))); do
     if [ -z "$IP_PPP" ]; then
         echo
         echo "!!! Unable to get IP on ${PPP_IF} (timeout)"
-        show_progress_phase2 $((i + 1)) "$COUNT" "Phase 2 (routes+proxies):"
+        show_progress $((i + 1)) "$COUNT" "Phase 2 (routes+proxies):" "$BLUE"
         continue
     fi
 
@@ -418,7 +381,7 @@ for i in $(seq 0 $((COUNT - 1))); do
     if [ "$PING_OK" -ne 1 ]; then
         echo
         echo "!!! Skipping ${PPP_IF} (${IP_PPP}) - no internet connectivity"
-        show_progress_phase2 $((i + 1)) "$COUNT" "Phase 2 (routes+proxies):"
+        show_progress $((i + 1)) "$COUNT" "Phase 2 (routes+proxies):" "$BLUE"
         continue
     fi
 
@@ -440,7 +403,7 @@ for i in $(seq 0 $((COUNT - 1))); do
     if ! ip route add "$IP_PPP"/32 dev "$PPP_IF" table "$TABLE_ID" >/dev/null 2>&1; then
         echo
         echo "!!! Failed to add host route ${IP_PPP}/32 via ${PPP_IF} (interface probably went down)"
-        show_progress_phase2 $((i + 1)) "$COUNT" "Phase 2 (routes+proxies):"
+        show_progress $((i + 1)) "$COUNT" "Phase 2 (routes+proxies):" "$BLUE"
         continue
     fi
 
@@ -448,7 +411,7 @@ for i in $(seq 0 $((COUNT - 1))); do
     if ! ip route add default dev "$PPP_IF" table "$TABLE_ID" >/dev/null 2>&1; then
         echo
         echo "!!! Failed to add default route via ${PPP_IF}"
-        show_progress_phase2 $((i + 1)) "$COUNT" "Phase 2 (routes+proxies):"
+        show_progress $((i + 1)) "$COUNT" "Phase 2 (routes+proxies):" "$BLUE"
         continue
     fi
 
@@ -456,7 +419,7 @@ for i in $(seq 0 $((COUNT - 1))); do
     if ! ip rule add from "$IP_PPP" table "$TABLE_ID" priority $((9000 + i)) >/dev/null 2>&1; then
         echo
         echo "!!! Failed to add ip rule from ${IP_PPP} for table ${TABLE_ID}"
-        show_progress_phase2 $((i + 1)) "$COUNT" "Phase 2 (routes+proxies):"
+        show_progress $((i + 1)) "$COUNT" "Phase 2 (routes+proxies):" "$BLUE"
         continue
     fi
 
@@ -484,7 +447,8 @@ for i in $(seq 0 $((COUNT - 1))); do
     # Add to RAW proxy list file (login/pass fixed example)
     echo "${IP_PPP}:${PORT}:fibre123:fibrebe123" >>"$PROXY_LIST_RAW"
 
-    show_progress_phase2 $((i + 1)) "$COUNT" "Phase 2 (routes+proxies):"
+    # barre bleue pour phase 2
+    show_progress $((i + 1)) "$COUNT" "Phase 2 (routes+proxies):" "$BLUE"
 done
 echo
 echo
@@ -618,8 +582,7 @@ echo "Starting live proxy health check (Ctrl+C to stop)..."
 
 ############################################
 # 13. Live proxy health check loop
-#     (et MAJ de /root/proxies.txt : on garde
-#      uniquement les proxies STATUS OK)
+#     (and live update of /root/proxies.txt)
 ############################################
 
 while true; do
@@ -637,9 +600,9 @@ while true; do
     OK_COUNT=0
     FAIL_COUNT=0
     FAILED_LIST=""
-    TMP_HEALTH=$(mktemp)   # nouvelle liste filtrée
+    TMP_HEALTH=$(mktemp)   # new filtered list
 
-    # Lire chaque proxy : HOST:PORT:USER:PASS
+    # Read each proxy: HOST:PORT:USER:PASS
     while IFS=':' read -r HOST PORT USER PASS; do
         [ -z "$HOST" ] && continue
 
@@ -649,11 +612,10 @@ while true; do
             PROXY_URL="http://${HOST}:${PORT}"
         fi
 
-        # Test comme un client externe (Google)
+        # Test as external client (Google)
         if curl -sS --max-time "$HEALTH_MAX_TIME" -x "$PROXY_URL" https://www.google.com >/dev/null 2>&1; then
             echo -e "${HOST}:${PORT} -> ${GREEN}STATUS OK !${RESET}"
             OK_COUNT=$((OK_COUNT + 1))
-            # On réécrit le proxy dans la NOUVELLE liste
             if [ -n "$USER" ] && [ -n "$PASS" ]; then
                 echo "${HOST}:${PORT}:${USER}:${PASS}" >>"$TMP_HEALTH"
             else
@@ -663,11 +625,11 @@ while true; do
             echo -e "${HOST}:${PORT} -> ${RED}STATUS FAIL${RESET}"
             FAIL_COUNT=$((FAIL_COUNT + 1))
             FAILED_LIST+="${HOST}:${PORT}\n"
-            # On NE l’écrit PAS dans TMP_HEALTH → supprimé
+            # not written to TMP_HEALTH → removed
         fi
     done < "$PROXY_LIST_FILE"
 
-    # Remplacer l’ancienne liste par la nouvelle filtrée
+    # Replace old list with new filtered one
     mv "$TMP_HEALTH" "$PROXY_LIST_FILE"
 
     TOTAL=$((OK_COUNT + FAIL_COUNT))
