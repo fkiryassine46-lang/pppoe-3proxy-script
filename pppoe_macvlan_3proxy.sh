@@ -20,6 +20,9 @@ WHITE="\e[37m"
 
 TMP_OUT=$(mktemp)
 
+# >>> ligne vide avant la barre <<<
+echo
+
 /usr/local/bin/check_license.sh --no-reboot >"$TMP_OUT" 2>&1 &
 LIC_PID=$!
 progress=0
