@@ -6,8 +6,7 @@ set -e
 # 0. Licence check with progress bar
 ############################################
 
-BAR_WIDTH=30
-BAR_CHAR="█"   # blocs pleins
+BAR_WIDTH=30   # (gardé mais plus vraiment utilisé pour la licence)
 
 GREEN="\e[32m"
 RED="\e[31m"
@@ -26,35 +25,60 @@ TMP_OUT=$(mktemp)
 
 /usr/local/bin/check_license.sh --no-reboot >"$TMP_OUT" 2>&1 &
 LIC_PID=$!
-progress=0
 
-# Affichage initial
-printf "Checking licence... ${BAR_YELLOW}%3d%% [%-*s]${RESET}" 0 "$BAR_WIDTH" ""
+# ---- nouvelle barre de licence style ███ comme les autres ----
+LIC_WIDTH=40
+LIC_PROGRESS=0
+BLOCK_CHAR="█"
+
+# affichage initial : 0% [                ]
+printf "${BAR_YELLOW}Checking licence...%3d%% [" 0
+for ((j=0; j<LIC_WIDTH; j++)); do
+    printf " "
+done
+printf "]${RESET}"
 
 while kill -0 "$LIC_PID" 2>/dev/null; do
-    if [ "$progress" -lt "$BAR_WIDTH" ]; then
-        progress=$((progress + 1))
+    if [ "$LIC_PROGRESS" -lt "$LIC_WIDTH" ]; then
+        LIC_PROGRESS=$((LIC_PROGRESS + 1))
     fi
 
-    percent=$(( progress * 100 / BAR_WIDTH ))
+    percent=$(( LIC_PROGRESS * 100 / LIC_WIDTH ))
     [ "$percent" -gt 100 ] && percent=100
 
-    filled=$(printf "%*s" "$progress" "" | tr ' ' "$BAR_CHAR")
-    empty=$(printf "%*s" "$((BAR_WIDTH - progress))" "")
+    filled=$LIC_PROGRESS
+    [ "$filled" -gt "$LIC_WIDTH" ] && filled="$LIC_WIDTH"
+    empty=$(( LIC_WIDTH - filled ))
 
-    printf "\rChecking licence... ${BAR_YELLOW}%3d%% [%s%s]${RESET}" "$percent" "$filled" "$empty"
+    # réécrire toute la ligne
+    printf "\r${BAR_YELLOW}Checking licence...%3d%% [" "$percent"
+
+    # partie remplie (blocs jaunes)
+    for ((j=0; j<filled; j++)); do
+        printf "%b" "${BAR_YELLOW}${BLOCK_CHAR}${RESET}"
+    done
+    # partie vide
+    for ((j=0; j<empty; j++)); do
+        printf " "
+    done
+
+    printf "]${RESET}"
     sleep 0.1
 done
 
+# récupérer le code retour du script de licence
 if wait "$LIC_PID"; then
     LIC_RC=0
 else
     LIC_RC=$?
 fi
 
-# fin : 100% et barre pleine
-filled=$(printf "%*s" "$BAR_WIDTH" "" | tr ' ' "$BAR_CHAR")
-printf "\rChecking licence... ${BAR_YELLOW}%3d%% [%s]${RESET}\n" 100 "$filled"
+# forcer 100% + barre pleine
+printf "\r${BAR_YELLOW}Checking licence...%3d%% [" 100
+for ((j=0; j<LIC_WIDTH; j++)); do
+    printf "%b" "${BAR_YELLOW}${BLOCK_CHAR}${RESET}"
+done
+printf "]${RESET}\n"
 
 if [ "$LIC_RC" -ne 0 ]; then
     echo
@@ -108,13 +132,12 @@ show_progress() {
     printf "]"
 }
 
-# helpers dédiés aux deux phases
 show_progress_phase1() {
-    show_progress "$1" "$2" "$3" "$BAR_GREEN"
+    show_progress "$1" "$2" "$3" "$BAR_GREEN"   # barre + % en vert
 }
 
 show_progress_phase2() {
-    show_progress "$1" "$2" "$3" "$BAR_BLUE"
+    show_progress "$1" "$2" "$3" "$BAR_BLUE"    # barre + % en bleu
 }
 
 ############################################
