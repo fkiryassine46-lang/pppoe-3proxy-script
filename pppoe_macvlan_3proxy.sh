@@ -357,7 +357,7 @@ for i in $(seq 0 $((COUNT - 1))); do
     TABLE_ID=$((TABLE_BASE + i))
     PRIO=$((9000 + i))
 
-    # 1) Supprime l’ancienne règle pour cet index (par priority, même si l’IP a changé)
+    # 1) Supprime l’ancienne règle pour cet index (par priority)
     ip rule del priority "$PRIO" >/dev/null 2>&1 || true
 
     # 2) Flush la table
@@ -390,6 +390,7 @@ for i in $(seq 0 $((COUNT - 1))); do
 
     if [ "$i" -lt "$MAX_PER_INSTANCE" ]; then
         PORT=$((BASE_PORT1 + i))
+        # 3proxy écoute sur toutes les IP locales, mais sort via IP_PPP
         echo "proxy -a -p${PORT} -i0.0.0.0 -e${IP_PPP}" >>"$THREEPROXY_CFG1"
     else
         INDEX2=$((i - MAX_PER_INSTANCE))
@@ -397,12 +398,14 @@ for i in $(seq 0 $((COUNT - 1))); do
         echo "proxy -a -p${PORT} -i0.0.0.0 -e${IP_PPP}" >>"$THREEPROXY_CFG2"
     fi
 
+    # Ouvre le port dans le firewall si iptables dispo
     if command -v iptables >/dev/null 2>&1; then
         iptables -C INPUT -p tcp --dport "$PORT" -j ACCEPT 2>/dev/null || \
         iptables -A INPUT -p tcp --dport "$PORT" -j ACCEPT
     fi
 
-    echo "${IP_PPP}:${PORT}:fibre123:fibrebe123" >>"$PROXY_LIST_RAW"
+    # >>> IMPORTANT : on écrit l’IP d’écoute (LISTEN_IP) dans la liste, PAS IP_PPP
+    echo "${LISTEN_IP}:${PORT}:fibre123:fibrebe123" >>"$PROXY_LIST_RAW"
 
     PH2_DONE=$((PH2_DONE + 1))
     progress_bar "$PH2_DONE" "$COUNT" "Phase 2"
@@ -467,6 +470,9 @@ TMP_FILE=$(mktemp)
 EXPORT_OK=0
 EXPORT_FAIL=0
 
+# >>> Attention : maintenant HOST = LISTEN_IP, l’IP publique vue par le site sera IP_PPP.
+# On ne compare plus PUBLIC_IP == HOST, on vérifie juste que le proxy répond.
+
 while IFS=':' read -r HOST PORT USER PASS; do
     [ -z "$HOST" ] && continue
 
@@ -478,21 +484,18 @@ while IFS=':' read -r HOST PORT USER PASS; do
 
     PUBLIC_IP=$(curl -sS --max-time 10 -x "$PROXY_URL" https://ipv4.icanhazip.com 2>/dev/null | tr -d '\r\n' || true)
 
-    if [ -n "$PUBLIC_IP" ] && [ "$PUBLIC_IP" = "$HOST" ]; then
+    if [ -n "$PUBLIC_IP" ]; then
+        # Proxy OK : on garde la ligne telle quelle (HOST = LISTEN_IP)
         if [ -n "$USER" ] && [ -n "$PASS" ]; then
             echo "${HOST}:${PORT}:${USER}:${PASS}" >>"$TMP_FILE"
         else
             echo "${HOST}:${PORT}" >>"$TMP_FILE"
         fi
         EXPORT_OK=$((EXPORT_OK+1))
-        echo -e "${HOST}:${PORT} -> ${PUBLIC_IP} ${GREEN}STATUS OK (KEPT)${RESET}"
+        echo -e "${HOST}:${PORT} -> external IP ${PUBLIC_IP} ${GREEN}STATUS OK (KEPT)${RESET}"
     else
         EXPORT_FAIL=$((EXPORT_FAIL+1))
-        if [ -z "$PUBLIC_IP" ]; then
-            echo -e "${HOST}:${PORT} -> ${RED}STATUS FAIL (no response, REMOVED)${RESET}"
-        else
-            echo -e "${HOST}:${PORT} -> ${PUBLIC_IP} ${RED}STATUS MISMATCH (REMOVED)${RESET}"
-        fi
+        echo -e "${HOST}:${PORT} -> ${RED}STATUS FAIL (no response, REMOVED)${RESET}"
     fi
 done < "$PROXY_LIST_RAW"
 
