@@ -7,7 +7,7 @@ set -e
 ############################################
 
 BAR_WIDTH=30
-BAR_CHAR="#"
+BAR_CHAR="█"   # blocs pleins
 
 GREEN="\e[32m"
 RED="\e[31m"
@@ -20,6 +20,7 @@ BLUE='\e[34m'
 # couleurs spéciales pour les barres
 BAR_GREEN="\e[92m"   # vert clair
 BAR_BLUE="\e[94m"    # bleu clair
+BAR_YELLOW="\e[93m"  # jaune clair
 
 TMP_OUT=$(mktemp)
 
@@ -27,17 +28,21 @@ TMP_OUT=$(mktemp)
 LIC_PID=$!
 progress=0
 
-printf "Checking licence... ${GREEN}[%*s]${RESET}" "$BAR_WIDTH" ""
+# Affichage initial
+printf "Checking licence... ${BAR_YELLOW}%3d%% [%-*s]${RESET}" 0 "$BAR_WIDTH" ""
 
 while kill -0 "$LIC_PID" 2>/dev/null; do
     if [ "$progress" -lt "$BAR_WIDTH" ]; then
         progress=$((progress + 1))
     fi
 
+    percent=$(( progress * 100 / BAR_WIDTH ))
+    [ "$percent" -gt 100 ] && percent=100
+
     filled=$(printf "%*s" "$progress" "" | tr ' ' "$BAR_CHAR")
     empty=$(printf "%*s" "$((BAR_WIDTH - progress))" "")
 
-    printf "\rChecking licence... ${GREEN}[%s%s]${RESET}" "$filled" "$empty"
+    printf "\rChecking licence... ${BAR_YELLOW}%3d%% [%s%s]${RESET}" "$percent" "$filled" "$empty"
     sleep 0.1
 done
 
@@ -47,8 +52,9 @@ else
     LIC_RC=$?
 fi
 
+# fin : 100% et barre pleine
 filled=$(printf "%*s" "$BAR_WIDTH" "" | tr ' ' "$BAR_CHAR")
-printf "\rChecking licence... ${GREEN}[%s]${RESET}\n" "$filled"
+printf "\rChecking licence... ${BAR_YELLOW}%3d%% [%s]${RESET}\n" 100 "$filled"
 
 if [ "$LIC_RC" -ne 0 ]; then
     echo
@@ -85,8 +91,8 @@ show_progress() {
     [ "$filled" -gt "$width" ] && filled="$width"
     local empty=$(( width - filled ))
 
-    # début de la ligne
-    printf "\r%s %3d%% [" "$label" "$percent"
+    # label + pourcentage coloré
+    printf "\r%s %b%3d%%%b [" "$label" "$color" "$percent" "$RESET"
 
     # partie remplie colorée
     local j
