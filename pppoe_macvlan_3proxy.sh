@@ -3,11 +3,8 @@
 set -e
 
 ############################################
-# 0. Licence check with progress bar
+# Couleurs
 ############################################
-
-BAR_WIDTH=30
-BAR_CHAR="█"
 
 GREEN="\e[32m"
 RED="\e[31m"
@@ -16,34 +13,43 @@ YELLOW="\e[33m"
 ORANGE="\e[38;5;208m"
 PINK="\e[35m"
 BLUE="\e[34m"
-WHITE="\e[37m"
+
+# Style des barres de progression (phases 1 & 2)
+PBAR_WIDTH=40
+PBAR_CHAR="█"
+
+############################################
+# 0. Licence check with progress bar (jaune)
+############################################
+
+LIC_BAR_WIDTH=40
+LIC_CHAR="█"
 
 TMP_OUT=$(mktemp)
-
-# >>> ligne vide avant la barre <<<
-echo
 
 /usr/local/bin/check_license.sh --no-reboot >"$TMP_OUT" 2>&1 &
 LIC_PID=$!
 progress=0
 
-# barre de progression licence (jaune)
-printf "${YELLOW}Checking licence...%s${RESET}" ""
+echo
+printf "${YELLOW}Checking licence... %3d%% [" 0
+printf "%*s" "$LIC_BAR_WIDTH" ""
+printf "]${RESET}"
 
 while kill -0 "$LIC_PID" 2>/dev/null; do
-    if [ "$progress" -lt "$BAR_WIDTH" ]; then
+    if [ "$progress" -lt "$LIC_BAR_WIDTH" ]; then
         progress=$((progress + 1))
     fi
 
-    percent=$(( progress * 100 / BAR_WIDTH ))
+    percent=$(( progress * 100 / LIC_BAR_WIDTH ))
     [ "$percent" -gt 100 ] && percent=100
 
     filled=$progress
-    empty=$((BAR_WIDTH - filled))
+    empty=$(( LIC_BAR_WIDTH - filled ))
 
     printf "\r${YELLOW}Checking licence... %3d%% [" "$percent"
-    printf "%0.s${BAR_CHAR}" $(seq 1 "$filled")
-    printf "%0.s "           $(seq 1 "$empty")
+    printf "%0.s$LIC_CHAR" $(seq 1 "$filled")
+    printf "%0.s "        $(seq 1 "$empty")
     printf "]${RESET}"
 
     sleep 0.1
@@ -55,42 +61,32 @@ else
     LIC_RC=$?
 fi
 
-# affichage final à 100 %
-filled=$BAR_WIDTH
-empty=0
-printf "\r${YELLOW}Checking licence... 100%% [" 
-printf "%0.s${BAR_CHAR}" $(seq 1 "$filled")
-printf "%0.s "           $(seq 1 "$empty")
-printf "]${RESET}\n"
+percent=100
+printf "\r${YELLOW}Checking licence... %3d%% [" "$percent"
+printf "%0.s$LIC_CHAR" $(seq 1 "$LIC_BAR_WIDTH")
+printf "]${RESET}\n\n"
 
 if [ "$LIC_RC" -ne 0 ]; then
     echo
     cat "$TMP_OUT"
     rm -f "$TMP_OUT"
-    echo              # ligne vide avant de quitter
     exit "$LIC_RC"
 fi
 
 rm -f "$TMP_OUT"
-echo                  # 1ère ligne vide
-echo                  # 2ème ligne vide
 
 ############################################
-# Helpers
+# Helper: barre de progression colorée
 ############################################
 
-# Progress bar (coloured blocks + coloured percentage)
-# $1 = current, $2 = total, $3 = label, $4 = colour code
 show_progress() {
     local current="$1"
     local total="$2"
     local label="$3"
     local color="$4"
-    local width=40
 
-    if [ "$total" -le 0 ]; then
-        return
-    fi
+    local width="$PBAR_WIDTH"
+    [ "$total" -le 0 ] && return
 
     local percent=$(( current * 100 / total ))
     [ "$percent" -gt 100 ] && percent=100
@@ -100,8 +96,8 @@ show_progress() {
     local empty=$(( width - filled ))
 
     printf "\r%s ${color}%3d%% [" "$label" "$percent"
-    printf "%0.s${BAR_CHAR}" $(seq 1 "$filled")
-    printf "%0.s "           $(seq 1 "$empty")
+    printf "%0.s$PBAR_CHAR" $(seq 1 "$filled")
+    printf "%0.s "          $(seq 1 "$empty")
     printf "]${RESET}"
 }
 
@@ -154,32 +150,6 @@ PROXY_LIST_FILE="/root/proxies.txt"      # final public list (served on port 199
 THREEPROXY_BIN="/usr/local/bin/3proxy"
 THREEPROXY_CFG1="/usr/local/etc/3proxy/3proxy1.cfg"
 THREEPROXY_CFG2="/usr/local/etc/3proxy/3proxy2.cfg"
-
-# Performance tuning
-CHECK_MAX_TIME=7           # Timeout for initial check (ipv4.icanhazip.com)
-CHECK_PARALLEL_JOBS=15     # Parallel curl jobs during initial check
-HEALTH_MAX_TIME=15         # Timeout for live health check (Google)
-
-# Map proxy TCP port -> PPP index (pppX) (kept for debug/future use)
-get_ppp_index_from_port() {
-    local port="$1"
-
-    # First 3proxy instance ports: BASE_PORT1 .. BASE_PORT1+MAX_PER_INSTANCE-1
-    if (( port >= BASE_PORT1 && port < BASE_PORT1 + MAX_PER_INSTANCE )); then
-        echo $((port - BASE_PORT1))
-        return 0
-    fi
-
-    # Second 3proxy instance ports: BASE_PORT2 .. BASE_PORT2+MAX_PER_INSTANCE-1
-    if (( port >= BASE_PORT2 && port < BASE_PORT2 + MAX_PER_INSTANCE )); then
-        echo $((port - BASE_PORT2))
-        return 0
-    fi
-
-    # Unknown / out of range
-    echo "-1"
-    return 1
-}
 
 ############################################
 # 3. Detect local IP on WAN_IF
@@ -326,7 +296,7 @@ EOF
         sleep 1
     fi
 
-    # barre verte pour phase 1
+    # Barre verte pour la phase 1
     show_progress $((i + 1)) "$COUNT" "Phase 1 (PPPoE sessions):" "$GREEN"
 done
 echo
@@ -450,7 +420,7 @@ for i in $(seq 0 $((COUNT - 1))); do
     # Add to RAW proxy list file (login/pass fixed example)
     echo "${IP_PPP}:${PORT}:fibre123:fibrebe123" >>"$PROXY_LIST_RAW"
 
-    # barre bleue pour phase 2
+    # Barre bleue pour la phase 2
     show_progress $((i + 1)) "$COUNT" "Phase 2 (routes+proxies):" "$BLUE"
 done
 echo
@@ -507,85 +477,60 @@ echo "Done."
 #     (keep only proxies that return same IP as HOST)
 ############################################
 
-echo -e "Running initial proxy verification in PARALLEL (keeping only ${GREEN}STATUS OK${RESET} proxies)..."
-echo "  Max parallel jobs : ${CHECK_PARALLEL_JOBS}"
-echo "  Curl timeout      : ${CHECK_MAX_TIME}s"
-echo
+echo -e "Running initial proxy verification (keeping only ${GREEN}STATUS OK${RESET} proxies)..."
 
-TMP_FILE_OK=$(mktemp)
-LOG_FILE=$(mktemp)
-TOTAL=0
+TMP_FILE=$(mktemp)
+EXPORT_OK=0
+EXPORT_FAIL=0
 
-check_one_proxy() {
-    local host="$1"
-    local port="$2"
-    local user="$3"
-    local pass="$4"
-
-    local proxy_url public_ip
-
-    if [ -n "$user" ] && [ -n "$pass" ]; then
-        proxy_url="http://${user}:${pass}@${host}:${port}"
-    else
-        proxy_url="http://${host}:${port}"
-    fi
-
-    public_ip=$(curl -sS --max-time "$CHECK_MAX_TIME" -x "$proxy_url" https://ipv4.icanhazip.com 2>/dev/null | tr -d '\r\n' || true)
-
-    if [ -n "$public_ip" ] && [ "$public_ip" = "$host" ]; then
-        if [ -n "$user" ] && [ -n "$pass" ]; then
-            echo "${host}:${port}:${user}:${pass}" >>"$TMP_FILE_OK"
-        else
-            echo "${host}:${port}" >>"$TMP_FILE_OK"
-        fi
-        echo -e "${host}:${port} -> ${public_ip} ${GREEN}STATUS OK (KEPT)${RESET}" >>"$LOG_FILE"
-    else
-        if [ -z "$public_ip" ]; then
-            echo -e "${host}:${port} -> ${RED}STATUS FAIL (no response, REMOVED)${RESET}" >>"$LOG_FILE"
-        else
-            echo -e "${host}:${port} -> ${public_ip} ${RED}STATUS MISMATCH (REMOVED)${RESET}" >>"$LOG_FILE"
-        fi
-    fi
-}
-
+# Read the RAW proxy list and keep only proxies that are really OK
 while IFS=':' read -r HOST PORT USER PASS; do
+    # Skip empty lines
     [ -z "$HOST" ] && continue
-    TOTAL=$((TOTAL + 1))
 
-    while [ "$(jobs -r | wc -l 2>/dev/null)" -ge "$CHECK_PARALLEL_JOBS" ]; do
-        sleep 0.1
-    done
+    if [ -n "$USER" ] && [ -n "$PASS" ]; then
+        PROXY_URL="http://${USER}:${PASS}@${HOST}:${PORT}"
+    else
+        PROXY_URL="http://${HOST}:${PORT}"
+    fi
 
-    check_one_proxy "$HOST" "$PORT" "$USER" "$PASS" &
+    # Test through ipv4.icanhazip.com (returned IP must match HOST)
+    PUBLIC_IP=$(curl -sS --max-time 10 -x "$PROXY_URL" https://ipv4.icanhazip.com 2>/dev/null | tr -d '\r\n' || true)
+
+    if [ -n "$PUBLIC_IP" ] && [ "$PUBLIC_IP" = "$HOST" ]; then
+        # Proxy is good -> keep it in the FINAL file
+        if [ -n "$USER" ] && [ -n "$PASS" ]; then
+            echo "${HOST}:${PORT}:${USER}:${PASS}" >>"$TMP_FILE"
+        else
+            echo "${HOST}:${PORT}" >>"$TMP_FILE"
+        fi
+        EXPORT_OK=$((EXPORT_OK+1))
+        echo -e "${HOST}:${PORT} -> ${PUBLIC_IP} ${GREEN}STATUS OK (KEPT)${RESET}"
+    else
+        # Proxy failed or IP mismatch -> do NOT write it to the FINAL file
+        EXPORT_FAIL=$((EXPORT_FAIL+1))
+        if [ -z "$PUBLIC_IP" ]; then
+            echo -e "${HOST}:${PORT} -> ${RED}STATUS FAIL (no response, REMOVED)${RESET}"
+        else
+            echo -e "${HOST}:${PORT} -> ${PUBLIC_IP} ${RED}STATUS MISMATCH (REMOVED)${RESET}"
+        fi
+    fi
 done < "$PROXY_LIST_RAW"
 
-wait
+# Replace/create the FINAL public file
+mv "$TMP_FILE" "$PROXY_LIST_FILE"
 
-if [ -s "$LOG_FILE" ]; then
-    cat "$LOG_FILE"
-fi
-
-EXPORT_OK=0
-if [ -s "$TMP_FILE_OK" ]; then
-    EXPORT_OK=$(wc -l < "$TMP_FILE_OK")
-fi
-EXPORT_FAIL=$((TOTAL - EXPORT_OK))
-
-mv "$TMP_FILE_OK" "$PROXY_LIST_FILE"
-rm -f "$LOG_FILE"
-
-echo
 echo "Initial export filter summary:"
 echo -e "  ${GREEN}OK proxies kept${RESET} : ${EXPORT_OK}"
 echo -e "  ${RED}Removed (bad)${RESET}    : ${EXPORT_FAIL}"
 
 echo "Proxy list available in: ${PROXY_LIST_FILE}"
+
 echo
 echo "Starting live proxy health check (Ctrl+C to stop)..."
 
 ############################################
 # 13. Live proxy health check loop
-#     (and live update of /root/proxies.txt)
 ############################################
 
 while true; do
@@ -600,13 +545,15 @@ while true; do
         break
     fi
 
+    # Counters for this round
     OK_COUNT=0
     FAIL_COUNT=0
+    # List of FAILED proxies for this round
     FAILED_LIST=""
-    TMP_HEALTH=$(mktemp)   # new filtered list
 
-    # Read each proxy: HOST:PORT:USER:PASS
+    # Read each proxy from the list: HOST:PORT:USER:PASS
     while IFS=':' read -r HOST PORT USER PASS; do
+        # Skip empty lines
         [ -z "$HOST" ] && continue
 
         if [ -n "$USER" ] && [ -n "$PASS" ]; then
@@ -615,25 +562,20 @@ while true; do
             PROXY_URL="http://${HOST}:${PORT}"
         fi
 
-        # Test as external client (Google)
-        if curl -sS --max-time "$HEALTH_MAX_TIME" -x "$PROXY_URL" https://www.google.com >/dev/null 2>&1; then
+        # Test the proxy like an external client: HTTPS request to Google
+        #  - If the request succeeds within 20 seconds => proxy OK
+        #  - If it times out or fails => proxy FAILED
+        if curl -sS --max-time 20 -x "$PROXY_URL" https://www.google.com >/dev/null 2>&1; then
             echo -e "${HOST}:${PORT} -> ${GREEN}STATUS OK !${RESET}"
-            OK_COUNT=$((OK_COUNT + 1))
-            if [ -n "$USER" ] && [ -n "$PASS" ]; then
-                echo "${HOST}:${PORT}:${USER}:${PASS}" >>"$TMP_HEALTH"
-            else
-                echo "${HOST}:${PORT}" >>"$TMP_HEALTH"
-            fi
+            OK_COUNT=$((OK_COUNT+1))
         else
             echo -e "${HOST}:${PORT} -> ${RED}STATUS FAIL${RESET}"
-            FAIL_COUNT=$((FAIL_COUNT + 1))
+            FAIL_COUNT=$((FAIL_COUNT+1))
+            # Keep list of failed proxies for the summary
             FAILED_LIST+="${HOST}:${PORT}\n"
-            # not written to TMP_HEALTH → removed
         fi
-    done < "$PROXY_LIST_FILE"
 
-    # Replace old list with new filtered one
-    mv "$TMP_HEALTH" "$PROXY_LIST_FILE"
+    done < "$PROXY_LIST_FILE"
 
     TOTAL=$((OK_COUNT + FAIL_COUNT))
 
@@ -643,9 +585,10 @@ while true; do
     echo -e "  ${GREEN}STATUS OK${RESET}            : ${GREEN}${OK_COUNT}${RESET}"
     echo -e "  ${RED}Failed${RESET}               : ${RED}${FAIL_COUNT}${RESET}"
 
+    # If some proxies failed, print their list in red
     if [ "$FAIL_COUNT" -gt 0 ]; then
         echo
-        echo -e "${RED}Failed proxies REMOVED from list:${RESET}"
+        echo -e "${RED}Failed proxies list:${RESET}"
         printf '%b' "$FAILED_LIST"
         echo
     fi
