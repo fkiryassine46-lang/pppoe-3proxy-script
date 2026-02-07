@@ -3,7 +3,7 @@
 set -e
 
 ############################################
-# 0. Licence check avec barre de progression
+# 0. Licence check with progress bar
 ############################################
 
 BAR_WIDTH=30
@@ -57,7 +57,7 @@ rm -f "$TMP_OUT"
 echo
 
 ############################################
-# Helper: barre de progression générique
+# Helper: generic progress bar (white)
 ############################################
 progress_bar() {
     local current="$1"
@@ -79,11 +79,12 @@ progress_bar() {
     bar_filled=$(printf "%*s" "$filled" "" | tr ' ' '#')
     bar_empty=$(printf "%*s" "$empty" "" | tr ' ' ' ')
 
+    # blanc (ou couleur par défaut du terminal)
     printf "\r%s [%-*s] %3d%%" "$label" "$width" "${bar_filled}${bar_empty}" "$percent"
 }
 
 ############################################
-# 1. Demande du nombre de proxies
+# 1. Ask how many proxies to generate
 ############################################
 
 DEFAULT_COUNT=3000
@@ -104,54 +105,59 @@ echo "Using COUNT=${COUNT} proxies."
 echo
 
 ############################################
-# 2. Config globale
+# 2. Global configuration
 ############################################
 
-# Interface WAN physique
+# Physical WAN interface
 WAN_IF="ens160"
 
-# Instances 3proxy (multi-port)
+# 3proxy instances (multi-port)
 BASE_PORT1=30000          # Instance 1 base port
 BASE_PORT2=60000          # Instance 2 base port
-MAX_PER_INSTANCE=1000     # Max proxies sur instance 1 (et 2)
+MAX_PER_INSTANCE=1000     # Max proxies on instance 1 (and 2)
 
-PARALLEL_START=50         # Nb de PPP à démarrer avant petite pause
+PARALLEL_START=50         # Number of PPP sessions to start before short pause
 
-# ID de base des tables de routage
+# Routing table base ID
 TABLE_BASE=9000
 
 # PPP credentials
 PPP_USER="centre04"
 PPP_PASS="centre04"
 
-# Fichiers et binaires
-PROXY_LIST_RAW="/root/proxies_raw.txt"   # liste interne brute
-PROXY_LIST_FILE="/root/proxies.txt"      # liste finale publique
+# Files and binaries
+PROXY_LIST_RAW="/root/proxies_raw.txt"   # internal raw list (for generation & tests)
+PROXY_LIST_FILE="/root/proxies.txt"      # final public list (served on port 1991)
 
 THREEPROXY_BIN="/usr/local/bin/3proxy"
 THREEPROXY_CFG1="/usr/local/etc/3proxy/3proxy1.cfg"
 THREEPROXY_CFG2="/usr/local/etc/3proxy/3proxy2.cfg"
 
-# Map port TCP proxy -> index PPP (pppX)
+# Map proxy TCP port -> PPP index (pppX)  **CORRIGÉ**
 get_ppp_index_from_port() {
     local port="$1"
 
+    # First 3proxy instance ports: BASE_PORT1 .. BASE_PORT1+MAX_PER_INSTANCE-1
     if (( port >= BASE_PORT1 && port < BASE_PORT1 + MAX_PER_INSTANCE )); then
+        # ppp0 .. ppp(MAX_PER_INSTANCE-1)
         echo $(( port - BASE_PORT1 ))
         return 0
     fi
 
+    # Second 3proxy instance ports: BASE_PORT2 .. BASE_PORT2+MAX_PER_INSTANCE-1
     if (( port >= BASE_PORT2 && port < BASE_PORT2 + MAX_PER_INSTANCE )); then
+        # pppMAX_PER_INSTANCE .. ppp(2*MAX_PER_INSTANCE-1)
         echo $(( port - BASE_PORT2 + MAX_PER_INSTANCE ))
         return 0
     fi
 
+    # Unknown / out of range
     echo "-1"
     return 1
 }
 
 ############################################
-# 3. Détection IP locale sur WAN_IF
+# 3. Detect local IP on WAN_IF
 ############################################
 
 LISTEN_IP=$(ip -4 addr show dev "$WAN_IF" | awk '/inet / {print $2}' | cut -d/ -f1 | head -n1)
@@ -175,7 +181,7 @@ if ! ip link show "$WAN_IF" >/dev/null 2>&1; then
 fi
 
 ############################################
-# 4. Cleanup anciennes configs + macvlans
+# 4. Cleanup old configs + macvlans
 ############################################
 
 echo "$(date) - Cleaning old configuration..."
@@ -183,16 +189,18 @@ echo "$(date) - Cleaning old configuration..."
 pkill 3proxy  >/dev/null 2>&1 || true
 pkill pppd    >/dev/null 2>&1 || true
 
+# Clean old macvlan interfaces (up to COUNT + 500, just to be safe)
 MAX_CLEAN=$((COUNT + 500))
 
 for i in $(seq 0 "$MAX_CLEAN"); do
     ip link show "macvlan$i" >/dev/null 2>&1 && ip link delete "macvlan$i" || true
 done
 
+# Reset RAW proxy list file (do not write anything yet)
 : > "$PROXY_LIST_RAW"
 
 ############################################
-# 5. PPP secrets
+# 5. Ensure PPP secrets contain our user
 ############################################
 
 for f in /etc/ppp/chap-secrets /etc/ppp/pap-secrets; do
@@ -208,7 +216,7 @@ mkdir -p "$(dirname "$THREEPROXY_CFG1")"
 mkdir -p /var/log/3proxy
 
 ############################################
-# 6. Configs 3proxy (deux instances)
+# 6. Prepare 3proxy configs (two instances)
 ############################################
 
 cat >"$THREEPROXY_CFG1" <<'EOF1'
@@ -238,7 +246,7 @@ allow *
 EOF2
 
 ############################################
-# 7. Phase 1 - Création des sessions PPPoE
+# 7. Phase 1 - Create PPPoE sessions in parallel
 ############################################
 
 echo "Starting service..."
@@ -265,7 +273,7 @@ for i in $(seq 0 $((COUNT - 1))); do
 plugin rp-pppoe.so
 $MACVLAN_IF
 noauth
-nodefaultroute
+defaultroute
 usepeerdns
 mtu 1492
 mru 1492
@@ -287,23 +295,26 @@ password "$PPP_PASS"
 unit $i
 EOF
 
+    # start pppd in BACKGROUND (we don't wait here)
     pppd call "pppoe$i" >/var/log/pppoe_$i.log 2>&1 &
 
+    # small pause every PARALLEL_START sessions to avoid overloading everything at once
     if (((i + 1) % PARALLEL_START == 0)); then
         sleep 1
     fi
 
+    # petite pause entre chaque PPP pour soulager le FAI
     sleep 0.1
 
     PH1_DONE=$((PH1_DONE + 1))
     progress_bar "$PH1_DONE" "$COUNT" "Phase 1"
 done
 
-echo
+echo    # fin de la barre
 echo
 
 ############################################
-# 8. Phase 2 - PPP + routes + 3proxy
+# 8. Phase 2 - Wait for PPP + routes + 3proxy entries
 ############################################
 
 echo "Phase 2: configuring routes and proxies..."
@@ -315,6 +326,7 @@ for i in $(seq 0 $((COUNT - 1))); do
     PPP_IF="ppp$i"
     MACVLAN_IF="macvlan$i"
 
+    # Wait for pppX interface to appear
     TIMEOUT=60
     while ! ip addr show "$PPP_IF" >/dev/null 2>&1 && [ "$TIMEOUT" -gt 0 ]; do
         sleep 1
@@ -327,6 +339,7 @@ for i in $(seq 0 $((COUNT - 1))); do
         continue
     fi
 
+    # Get public IP on PPP interface
     IP_PPP=""
     TIMEOUT_IP=30
     while [ -z "$IP_PPP" ] && [ "$TIMEOUT_IP" -gt 0 ]; do
@@ -342,6 +355,9 @@ for i in $(seq 0 $((COUNT - 1))); do
         continue
     fi
 
+    ########################################
+    # Quick connectivity test with ping
+    ########################################
     if command -v ping >/dev/null 2>&1; then
         if ! ping -I "$PPP_IF" -c 2 -W 3 8.8.8.8 >/dev/null 2>&1; then
             echo
@@ -351,71 +367,73 @@ for i in $(seq 0 $((COUNT - 1))); do
     fi
 
     ########################################
-    # Table et règle de routage dédiées
+    # Dedicated routing table for this PPP
     ########################################
 
     TABLE_ID=$((TABLE_BASE + i))
-    PRIO=$((9000 + i))
 
-    # 1) Supprime l’ancienne règle pour cet index (par priority)
-    ip rule del priority "$PRIO" >/dev/null 2>&1 || true
+    # 1) Remove all existing rules for this IP (in any table)
+    while ip rule show | grep -q "from $IP_PPP"; do
+        ip rule delete from "$IP_PPP" >/dev/null 2>&1 || break
+    done
 
-    # 2) Flush la table
+    # 2) Flush routing table for this PPP
     ip route flush table "$TABLE_ID" >/dev/null 2>&1 || true
 
-    # 3) Route host /32 vers PPP
+    # 3) Add host route for the PPP IP in its table
     if ! ip route add "$IP_PPP"/32 dev "$PPP_IF" table "$TABLE_ID" >/dev/null 2>&1; then
         echo
         echo "!!! Failed to add host route ${IP_PPP}/32 via ${PPP_IF} (interface probably went down)"
         continue
     fi
 
-    # 4) Route par défaut via PPP dans sa table
+    # 4) Add default route via this PPP interface
     if ! ip route add default dev "$PPP_IF" table "$TABLE_ID" >/dev/null 2>&1; then
         echo
         echo "!!! Failed to add default route via ${PPP_IF}"
         continue
     fi
 
-    # 5) Règle avec priorité fixe (liée à l’index PPP)
-    if ! ip rule add from "$IP_PPP" table "$TABLE_ID" priority "$PRIO" >/dev/null 2>&1; then
+    # 5) Add a single routing rule for this IP to this table
+    if ! ip rule add from "$IP_PPP" table "$TABLE_ID" priority $((9000 + i)) >/dev/null 2>&1; then
         echo
         echo "!!! Failed to add ip rule from ${IP_PPP} for table ${TABLE_ID}"
         continue
     fi
 
     ########################################
-    # Mapping 3proxy (multi-port)
+    # 3proxy mapping for this PPP (multi-port)
     ########################################
 
     if [ "$i" -lt "$MAX_PER_INSTANCE" ]; then
+        # Instance 1
         PORT=$((BASE_PORT1 + i))
-        # 3proxy écoute sur toutes les IP locales, mais sort via IP_PPP
         echo "proxy -a -p${PORT} -i0.0.0.0 -e${IP_PPP}" >>"$THREEPROXY_CFG1"
     else
+        # Instance 2
         INDEX2=$((i - MAX_PER_INSTANCE))
         PORT=$((BASE_PORT2 + INDEX2))
         echo "proxy -a -p${PORT} -i0.0.0.0 -e${IP_PPP}" >>"$THREEPROXY_CFG2"
     fi
 
-    # Ouvre le port dans le firewall si iptables dispo
+    # Open the port in firewall if iptables is available
     if command -v iptables >/dev/null 2>&1; then
         iptables -C INPUT -p tcp --dport "$PORT" -j ACCEPT 2>/dev/null || \
         iptables -A INPUT -p tcp --dport "$PORT" -j ACCEPT
     fi
 
-    # >>> IMPORTANT : on écrit l’IP d’écoute (LISTEN_IP) dans la liste, PAS IP_PPP
-    echo "${LISTEN_IP}:${PORT}:fibre123:fibrebe123" >>"$PROXY_LIST_RAW"
+    # Add to RAW proxy list file (login/pass fixed example)
+    echo "${IP_PPP}:${PORT}:fibre123:fibrebe123" >>"$PROXY_LIST_RAW"
 
     PH2_DONE=$((PH2_DONE + 1))
     progress_bar "$PH2_DONE" "$COUNT" "Phase 2"
 done
 
-echo
+echo    # fin de la barre
 echo
 
 ############################################
-# 9. Route par défaut via ppp0 (optionnel)
+# 9. Optional: adjust default route via ppp0
 ############################################
 
 if ip link show ppp0 >/dev/null 2>&1; then
@@ -424,7 +442,7 @@ if ip link show ppp0 >/dev/null 2>&1; then
 fi
 
 ############################################
-# 10. Mini serveur HTTP pour proxies.txt
+# 10. Mini HTTP server to download proxies.txt
 ############################################
 
 IP_PUBLIC="$LISTEN_IP"
@@ -441,7 +459,7 @@ else
 fi
 
 ############################################
-# 11. Démarrage des instances 3proxy
+# 11. Start 3proxy instances
 ############################################
 
 echo
@@ -461,7 +479,8 @@ echo
 echo "Done."
 
 ############################################
-# 12. Vérification initiale des proxies
+# 12. Initial proxy verification before export
+#     (keep only proxies that return same IP as HOST)
 ############################################
 
 echo -e "Running initial proxy verification (keeping only ${GREEN}STATUS OK${RESET} proxies)..."
@@ -470,10 +489,9 @@ TMP_FILE=$(mktemp)
 EXPORT_OK=0
 EXPORT_FAIL=0
 
-# >>> Attention : maintenant HOST = LISTEN_IP, l’IP publique vue par le site sera IP_PPP.
-# On ne compare plus PUBLIC_IP == HOST, on vérifie juste que le proxy répond.
-
+# Read the RAW proxy list and keep only proxies that are really OK
 while IFS=':' read -r HOST PORT USER PASS; do
+    # Skip empty lines
     [ -z "$HOST" ] && continue
 
     if [ -n "$USER" ] && [ -n "$PASS" ]; then
@@ -482,23 +500,30 @@ while IFS=':' read -r HOST PORT USER PASS; do
         PROXY_URL="http://${HOST}:${PORT}"
     fi
 
+    # Test through ipv4.icanhazip.com (returned IP must match HOST)
     PUBLIC_IP=$(curl -sS --max-time 10 -x "$PROXY_URL" https://ipv4.icanhazip.com 2>/dev/null | tr -d '\r\n' || true)
 
-    if [ -n "$PUBLIC_IP" ]; then
-        # Proxy OK : on garde la ligne telle quelle (HOST = LISTEN_IP)
+    if [ -n "$PUBLIC_IP" ] && [ "$PUBLIC_IP" = "$HOST" ]; then
+        # Proxy is good -> keep it in the FINAL file
         if [ -n "$USER" ] && [ -n "$PASS" ]; then
             echo "${HOST}:${PORT}:${USER}:${PASS}" >>"$TMP_FILE"
         else
             echo "${HOST}:${PORT}" >>"$TMP_FILE"
         fi
         EXPORT_OK=$((EXPORT_OK+1))
-        echo -e "${HOST}:${PORT} -> external IP ${PUBLIC_IP} ${GREEN}STATUS OK (KEPT)${RESET}"
+        echo -e "${HOST}:${PORT} -> ${PUBLIC_IP} ${GREEN}STATUS OK (KEPT)${RESET}"
     else
+        # Proxy failed or IP mismatch -> do NOT write it to the FINAL file
         EXPORT_FAIL=$((EXPORT_FAIL+1))
-        echo -e "${HOST}:${PORT} -> ${RED}STATUS FAIL (no response, REMOVED)${RESET}"
+        if [ -z "$PUBLIC_IP" ]; then
+            echo -e "${HOST}:${PORT} -> ${RED}STATUS FAIL (no response, REMOVED)${RESET}"
+        else
+            echo -e "${HOST}:${PORT} -> ${PUBLIC_IP} ${RED}STATUS MISMATCH (REMOVED)${RESET}"
+        fi
     fi
 done < "$PROXY_LIST_RAW"
 
+# Replace/create the FINAL public file
 mv "$TMP_FILE" "$PROXY_LIST_FILE"
 
 echo "Initial export filter summary:"
@@ -511,7 +536,7 @@ echo
 echo "Starting live proxy health check (Ctrl+C to stop)..."
 
 ############################################
-# 13. Boucle de health-check live
+# 13. Live proxy health check loop
 ############################################
 
 while true; do
@@ -526,11 +551,15 @@ while true; do
         break
     fi
 
+    # Counters for this round
     OK_COUNT=0
     FAIL_COUNT=0
+    # List of FAILED proxies for this round
     FAILED_LIST=""
 
+    # Read each proxy from the list: HOST:PORT:USER:PASS
     while IFS=':' read -r HOST PORT USER PASS; do
+        # Skip empty lines
         [ -z "$HOST" ] && continue
 
         if [ -n "$USER" ] && [ -n "$PASS" ]; then
@@ -539,12 +568,16 @@ while true; do
             PROXY_URL="http://${HOST}:${PORT}"
         fi
 
+        # Test the proxy like an external client: HTTPS request to Google
+        #  - If the request succeeds within 20 seconds => proxy OK
+        #  - If it times out or fails => proxy FAILED
         if curl -sS --max-time 20 -x "$PROXY_URL" https://www.google.com >/dev/null 2>&1; then
             echo -e "${HOST}:${PORT} -> ${GREEN}STATUS OK !${RESET}"
             OK_COUNT=$((OK_COUNT+1))
         else
             echo -e "${HOST}:${PORT} -> ${RED}STATUS FAIL${RESET}"
             FAIL_COUNT=$((FAIL_COUNT+1))
+            # Keep list of failed proxies for the summary
             FAILED_LIST+="${HOST}:${PORT}\n"
         fi
 
@@ -558,6 +591,7 @@ while true; do
     echo -e "  ${GREEN}STATUS OK${RESET}            : ${GREEN}${OK_COUNT}${RESET}"
     echo -e "  ${RED}Failed${RESET}               : ${RED}${FAIL_COUNT}${RESET}"
 
+    # If some proxies failed, print their list in red
     if [ "$FAIL_COUNT" -gt 0 ]; then
         echo
         echo -e "${RED}Failed proxies list:${RESET}"
