@@ -101,28 +101,7 @@ progress_bar() {
 }
 
 ############################################
-# 1. Demande du nombre de proxies
-############################################
-
-DEFAULT_COUNT=3000
-echo
-read -r -p "How many proxies do you want to generate? [default: ${DEFAULT_COUNT}]: " USER_COUNT
-
-if [ -z "$USER_COUNT" ]; then
-    COUNT="$DEFAULT_COUNT"
-elif [[ "$USER_COUNT" =~ ^[0-9]+$ ]] && [ "$USER_COUNT" -gt 0 ]; then
-    COUNT="$USER_COUNT"
-else
-    echo "Invalid number, using default ${DEFAULT_COUNT}."
-    COUNT="$DEFAULT_COUNT"
-fi
-
-echo
-echo "Using COUNT=${COUNT} proxies."
-echo
-
-############################################
-# 2. Config globale
+# 1. Config globale
 ############################################
 
 WAN_IF="ens160"
@@ -131,27 +110,27 @@ BASE_PORT1=30000
 BASE_PORT2=60000
 MAX_PER_INSTANCE=1000
 
-# --- Rythme de démarrage PPPoE ---
-# Le BRAS Maroc Telecom (Huawei ME60) bloque temporairement si trop de
-# demandes PPPoE arrivent trop vite. Le script ralentit automatiquement
-# dès qu'il détecte des "Timeout waiting for PADO", puis ré-accélère.
-BATCH_SIZE=5              # nb de sessions lancées avant une pause
-BATCH_PAUSE=5             # pause normale (s) entre deux lots
-MAX_BATCH_PAUSE=60        # pause max (s) quand le BRAS sature
-START_DELAY=1             # pause (s) entre chaque session
+# --- Limite physique de la ligne (Maroc Telecom) ---------------------------
+# L'OLT de Maroc Telecom n'accepte qu'un nombre limite d'adresses MAC
+# distinctes sur ta ligne fibre (reglage "max-mac", ~18 chez toi).
+# Chaque MAC peut tenir 1 session PPPoE par BRAS, et il y a 2 BRAS.
+#   => maximum STABLE = MAX_MACS x 2 BRAS.
+# On NE depasse jamais ca : au-dela, chaque tentative en trop fait envoyer
+# un PADT par le BRAS qui TUE une session existante. C'est ce qui faisait
+# "mourir" tes proxies. Ici on reste pile dans la limite => stable.
+MAX_MACS=18
 
-# --- Attente d'une vraie IP par session (Phase 2, 1er passage) ---
-WAIT_IP=20
+# Les 2 BRAS (Access Concentrators) de ta ligne. Valeurs par defaut =
+# celles detectees chez toi. Le script tente de les re-detecter tout seul
+# au demarrage (au cas ou MT les renomme).
+AC_NAMES=("BAS_ME60_CASA_ANWAL_02" "BAS_ME60_CASA_NU_02")
 
-# --- Nouvelles tentatives pour les sessions ratées ---
-RETRY_ROUNDS=5            # nb de tours de rattrapage
-RETRY_WAIT=45             # attente (s) avant chaque tour
-
-# --- Délai après arrêt des anciennes sessions ---
-CLEAN_WAIT=10
-
-# --- MAC fixes par macvlan (1 = MAC stable, 0 = aléatoire) ---
-USE_FIXED_MAC=1
+# --- Rythme de demarrage (doux, pour ne pas saturer le BRAS) ---------------
+START_DELAY=2        # pause (s) entre le lancement de deux sessions
+WAIT_IP=25           # attente (s) d'une vraie IP par session
+RETRY_ROUNDS=4       # tours de rattrapage (RELANCE seulement, aucune nouvelle session)
+RETRY_WAIT=40        # attente (s) avant chaque tour de rattrapage
+CLEAN_WAIT=12        # attente (s) apres arret des anciennes sessions
 
 TABLE_BASE=9000
 
@@ -196,12 +175,69 @@ stop_ppp_session() {
     pkill -f "pppd call pppoe${1}\$" >/dev/null 2>&1 || true
 }
 
-count_pado_timeouts() {
-    cat /var/log/pppoe_*.log 2>/dev/null | grep -c "Timeout waiting for PADO" || true
+# Cree (ou reutilise) une macvlan avec une MAC fixe basee sur son index
+create_macvlan() {
+    local m="$1"
+    local ifc="macvlan$m"
+    if ip link show "$ifc" >/dev/null 2>&1; then
+        ip link set "$ifc" up 2>/dev/null || true
+        return 0
+    fi
+    local mac
+    mac=$(printf "02:4d:54:%02x:%02x:%02x" $(( (m >> 16) & 255 )) $(( (m >> 8) & 255 )) $(( m & 255 )))
+    ip link add link "$WAN_IF" name "$ifc" address "$mac" type macvlan mode bridge 2>/dev/null || return 1
+    ip link set "$ifc" up
+    return 0
+}
+
+# Detecte les noms des BRAS (Access Concentrators) via PADI/PADO
+detect_ac_names() {
+    local ifc="$1"
+    timeout 15 pppoe-discovery -I "$ifc" 2>/dev/null \
+        | awk -F': ' '/Access-Concentrator/{print $2}' \
+        | sed 's/[[:space:]]*$//' \
+        | awk 'NF' \
+        | sort -u
+}
+
+# Ecrit le fichier peer d'une session, epinglee a un BRAS precis
+write_peer() {
+    local i="$1" m="$2" ac="$3"
+    local ac_line=""
+    if [ "$AC_OPT_OK" -eq 1 ] && [ -n "$ac" ]; then
+        ac_line="rp_pppoe_ac \"$ac\""
+    fi
+    local holdoff=$((20 + (i % 20)))
+    {
+        echo "plugin rp-pppoe.so"
+        echo "macvlan$m"
+        [ -n "$ac_line" ] && echo "$ac_line"
+        [ -n "$PADI_OPTS" ] && printf '%s\n' "$PADI_OPTS"
+        cat <<EOF
+noauth
+nodefaultroute
+usepeerdns
+mtu 1492
+mru 1492
+lcp-echo-interval 30
+lcp-echo-failure 10
+persist
+maxfail 0
+holdoff $holdoff
+noipdefault
+ipcp-accept-local
+ipcp-accept-remote
+noccp
+user "$PPP_USER"
+password "$PPP_PASS"
+unit $i
+logfile /var/log/pppoe_$i.log
+EOF
+    } >"/etc/ppp/peers/pppoe$i"
 }
 
 ############################################
-# 3. Détection IP locale sur WAN_IF
+# 2. Détection IP locale sur WAN_IF
 ############################################
 
 LISTEN_IP=$(get_ppp_ip "$WAN_IF")
@@ -225,7 +261,7 @@ if ! ip link show "$WAN_IF" >/dev/null 2>&1; then
 fi
 
 ############################################
-# 4. Cleanup propre (sessions, règles, macvlans)
+# 3. Cleanup propre (sessions, règles, macvlans)
 ############################################
 
 echo "$(date) - Cleaning old configuration..."
@@ -233,7 +269,7 @@ echo "$(date) - Cleaning old configuration..."
 pkill 3proxy >/dev/null 2>&1 || true
 pkill -f "http.server 1991" >/dev/null 2>&1 || true
 
-# Arrêt PROPRE de pppd (PADT envoyé => sessions libérées chez le FAI)
+# Arret PROPRE de pppd (PADT envoye => sessions liberees chez le FAI)
 if pgrep -x pppd >/dev/null 2>&1; then
     pkill -TERM -x pppd >/dev/null 2>&1 || true
     for _ in $(seq 1 20); do
@@ -245,7 +281,7 @@ if pgrep -x pppd >/dev/null 2>&1; then
     sleep "$CLEAN_WAIT"
 fi
 
-MAX_CLEAN=$((COUNT + 500))
+MAX_CLEAN=$((MAX_MACS * 2 + 500))
 
 for p in $(ip rule show | awk -F: '{print $1+0}' | sort -un); do
     if [ "$p" -ge 9000 ] && [ "$p" -lt $((9000 + MAX_CLEAN)) ]; then
@@ -262,7 +298,7 @@ done
 rm -f /var/log/pppoe_*.log
 
 ############################################
-# 5. PPP secrets
+# 4. PPP secrets + dossiers
 ############################################
 
 for f in /etc/ppp/chap-secrets /etc/ppp/pap-secrets; do
@@ -278,7 +314,6 @@ mkdir -p "$(dirname "$THREEPROXY_CFG1")"
 mkdir -p /var/log/3proxy
 
 # Options PADI plus patientes si la version de pppd les supporte
-# (sinon on ne les met pas, pour ne rien casser)
 PADI_OPTS=""
 if pppd plugin rp-pppoe.so "$WAN_IF" pppoe-padi-timeout 10 pppoe-padi-attempts 4 dryrun >/dev/null 2>&1; then
     PADI_OPTS="pppoe-padi-timeout 10
@@ -286,7 +321,84 @@ pppoe-padi-attempts 4"
 fi
 
 ############################################
-# 6. Configs 3proxy (deux instances)
+# 5. Détection des BRAS + capacité réelle de la ligne
+############################################
+
+echo "Probing the line (detecting BRAS / Access Concentrators)..."
+
+# macvlan0 sert de sonde (et sera reutilisee comme 1re vraie macvlan)
+if ! create_macvlan 0; then
+    echo "!!! Failed to create probe interface macvlan0"
+    exit 1
+fi
+sleep 2
+
+DET=()
+mapfile -t DET < <(detect_ac_names macvlan0 || true)
+
+if [ "${#DET[@]}" -ge 2 ]; then
+    AC_NAMES=("${DET[0]}" "${DET[1]}")
+    echo -e "  -> Detected 2 BRAS: ${GREEN}${AC_NAMES[0]}${RESET} / ${GREEN}${AC_NAMES[1]}${RESET}"
+elif [ "${#DET[@]}" -eq 1 ]; then
+    AC_NAMES=("${DET[0]}")
+    echo -e "  -> ${YELLOW}Only 1 BRAS detected:${RESET} ${AC_NAMES[0]}"
+else
+    echo -e "  -> ${YELLOW}AC auto-detect failed, using defaults:${RESET} ${AC_NAMES[0]} / ${AC_NAMES[1]}"
+fi
+
+# Est-ce que pppd sait epingler une session a un BRAS precis ?
+AC_OPT_OK=0
+if pppd plugin rp-pppoe.so macvlan0 rp_pppoe_ac "${AC_NAMES[0]}" dryrun >/dev/null 2>&1; then
+    AC_OPT_OK=1
+    echo -e "  -> BRAS pinning (rp_pppoe_ac): ${GREEN}supported${RESET}"
+else
+    echo -e "  -> BRAS pinning (rp_pppoe_ac): ${RED}NOT supported by this pppd${RESET}"
+fi
+
+# Nombre de sessions par MAC
+SESSIONS_PER_MAC=${#AC_NAMES[@]}
+
+# Sans epinglage, 2 sessions sur la meme MAC se battent (PADT) => on se
+# limite a 1 session/MAC pour rester 100% stable.
+if [ "$AC_OPT_OK" -ne 1 ] && [ "$SESSIONS_PER_MAC" -gt 1 ]; then
+    echo -e "  -> ${YELLOW}Falling back to 1 session per MAC (no pinning) to stay stable.${RESET}"
+    SESSIONS_PER_MAC=1
+    AC_NAMES=("${AC_NAMES[0]}")
+fi
+
+MAX_TOTAL=$((MAX_MACS * SESSIONS_PER_MAC))
+
+############################################
+# 6. Combien de proxies ? (plafonné à la capacité réelle)
+############################################
+
+echo
+echo -e "This line supports at most ${GREEN}${MAX_TOTAL}${RESET} STABLE proxies"
+echo -e "  (${MAX_MACS} MAC x ${SESSIONS_PER_MAC} BRAS)."
+echo
+read -r -p "How many proxies do you want to generate? [default: ${MAX_TOTAL}]: " USER_COUNT
+
+if [ -z "$USER_COUNT" ]; then
+    COUNT="$MAX_TOTAL"
+elif [[ "$USER_COUNT" =~ ^[0-9]+$ ]] && [ "$USER_COUNT" -gt 0 ]; then
+    COUNT="$USER_COUNT"
+else
+    echo "Invalid number, using ${MAX_TOTAL}."
+    COUNT="$MAX_TOTAL"
+fi
+
+if [ "$COUNT" -gt "$MAX_TOTAL" ]; then
+    echo -e "${YELLOW}Requested ${COUNT}, but the line only supports ${MAX_TOTAL} stable proxies.${RESET}"
+    echo -e "${YELLOW}Capping to ${MAX_TOTAL} (asking for more only kills existing sessions).${RESET}"
+    COUNT="$MAX_TOTAL"
+fi
+
+echo
+echo "Using COUNT=${COUNT} proxies."
+echo
+
+############################################
+# 7. Configs 3proxy (deux instances)
 ############################################
 
 for n in 1 2; do
@@ -306,102 +418,50 @@ EOF
 done
 
 ############################################
-# 7. Phase 1 - Création des sessions PPPoE
+# 8. Phase 1 - Lancement des sessions PPPoE (doux)
 ############################################
 
 echo "Starting service..."
 echo
-echo "Phase 1: creating PPPoE sessions..."
+echo "Phase 1: creating PPPoE sessions (gentle start)..."
 echo
 
 PH1_DONE=0
-CUR_PAUSE="$BATCH_PAUSE"
-LAST_TO=0
 
 for i in $(seq 0 $((COUNT - 1))); do
-    MACVLAN_IF="macvlan$i"
+    M=$(( i / SESSIONS_PER_MAC ))
+    A=$(( i % SESSIONS_PER_MAC ))
+    AC="${AC_NAMES[$A]}"
 
-    ADD_OK=0
-    if [ "$USE_FIXED_MAC" -eq 1 ]; then
-        MAC=$(printf "02:4d:54:%02x:%02x:%02x" $(( (i >> 16) & 255 )) $(( (i >> 8) & 255 )) $(( i & 255 )))
-        ip link add link "$WAN_IF" name "$MACVLAN_IF" address "$MAC" type macvlan mode bridge 2>/dev/null && ADD_OK=1
-    else
-        ip link add link "$WAN_IF" name "$MACVLAN_IF" type macvlan mode bridge 2>/dev/null && ADD_OK=1
+    # Une seule macvlan par MAC, partagee par ses 2 sessions (1 par BRAS)
+    if [ "$A" -eq 0 ]; then
+        if ! create_macvlan "$M"; then
+            echo
+            echo "!!! Failed to create macvlan${M}"
+            continue
+        fi
     fi
 
-    if [ "$ADD_OK" -ne 1 ]; then
-        echo
-        echo "!!! Failed to create ${MACVLAN_IF}"
-        continue
-    fi
-
-    ip link set "$MACVLAN_IF" up
-
-    # holdoff étalé (30..59s) pour que les re-tentatives ne partent pas
-    # toutes en même temps vers le BRAS
-    HOLDOFF=$((30 + (i % 30)))
-
-    cat >"/etc/ppp/peers/pppoe$i" <<EOF
-plugin rp-pppoe.so
-$MACVLAN_IF
-$PADI_OPTS
-noauth
-nodefaultroute
-usepeerdns
-mtu 1492
-mru 1492
-
-lcp-echo-interval 30
-lcp-echo-failure 10
-persist
-maxfail 0
-holdoff $HOLDOFF
-noipdefault
-ipcp-accept-local
-ipcp-accept-remote
-noccp
-user "$PPP_USER"
-password "$PPP_PASS"
-unit $i
-logfile /var/log/pppoe_$i.log
-EOF
-
+    write_peer "$i" "$M" "$AC"
     pppd call "pppoe$i" >/dev/null 2>&1 &
 
     PH1_DONE=$((PH1_DONE + 1))
     progress_bar "$PH1_DONE" "$COUNT" "Phase 1" "$GREEN" "$GREEN_BG"
 
-    # Pause adaptative : si le BRAS ne répond plus (PADO timeout), on ralentit
-    if (((i + 1) % BATCH_SIZE == 0)); then
-        TO_NOW=$(count_pado_timeouts)
-        if [ "$TO_NOW" -gt "$LAST_TO" ]; then
-            CUR_PAUSE=$((CUR_PAUSE * 2))
-            [ "$CUR_PAUSE" -gt "$MAX_BATCH_PAUSE" ] && CUR_PAUSE="$MAX_BATCH_PAUSE"
-            printf " %b(ISP busy, pause %ss)%b   " "$YELLOW" "$CUR_PAUSE" "$RESET"
-        elif [ "$CUR_PAUSE" -gt "$BATCH_PAUSE" ]; then
-            CUR_PAUSE=$((CUR_PAUSE / 2))
-            [ "$CUR_PAUSE" -lt "$BATCH_PAUSE" ] && CUR_PAUSE="$BATCH_PAUSE"
-            printf "                        "
-        fi
-        LAST_TO="$TO_NOW"
-        sleep "$CUR_PAUSE"
-    else
-        sleep "$START_DELAY"
-    fi
+    sleep "$START_DELAY"
 done
 
 echo
 echo
 
 ############################################
-# 8. Phase 2 - PPP + routes + 3proxy
+# 9. Phase 2 - PPP + routes + 3proxy
 ############################################
 
 PH2_OK=0
 FAILED_IDX=()
 PENDING=()
 
-# Configure routage + 3proxy pour une session qui a une vraie IP
 configure_session() {
     local i="$1"
     local IP_PPP="$2"
@@ -471,8 +531,6 @@ for i in $(seq 0 $((COUNT - 1))); do
     if [ -n "$IP_PPP" ]; then
         configure_session "$i" "$IP_PPP" || FAILED_IDX+=("$i")
     else
-        # Pas d'IP pour l'instant : pppd continue d'essayer tout seul,
-        # on revérifiera pendant les tours de rattrapage
         PENDING+=("$i")
     fi
 
@@ -485,7 +543,7 @@ echo
 echo -e "First pass: ${GREEN}${PH2_OK}${RESET} up, ${YELLOW}${#PENDING[@]}${RESET} pending"
 
 ############################################
-# 8a. Tours de rattrapage des sessions ratées
+# 9a. Tours de rattrapage (RELANCE seulement, aucune nouvelle session)
 ############################################
 
 ROUND=1
@@ -504,7 +562,8 @@ while [ "${#PENDING[@]}" -gt 0 ] && [ "$ROUND" -le "$RETRY_ROUNDS" ]; do
                 FAILED_IDX+=("$i")
             fi
         else
-            # pppd mort ? on le relance (une session à la fois, doucement)
+            # pppd mort ? on relance CE slot precis (meme MAC, meme BRAS).
+            # On ne cree JAMAIS de MAC/session supplementaire.
             if ! ppp_session_running "$i"; then
                 pppd call "pppoe$i" >/dev/null 2>&1 &
                 sleep "$START_DELAY"
@@ -518,7 +577,7 @@ while [ "${#PENDING[@]}" -gt 0 ] && [ "$ROUND" -le "$RETRY_ROUNDS" ]; do
     ROUND=$((ROUND + 1))
 done
 
-# Celles qui n'ont jamais marché : on arrête pppd (pas de spam vers le FAI)
+# Celles qui n'ont jamais marche : on arrete pppd (pas de spam vers le FAI)
 for i in "${PENDING[@]}"; do
     stop_ppp_session "$i"
     FAILED_IDX+=("$i")
@@ -528,7 +587,7 @@ echo
 echo -e "PPPoE sessions established: ${GREEN}${PH2_OK}${RESET} / ${COUNT}"
 
 ############################################
-# 8b. Diagnostic des sessions échouées
+# 9b. Diagnostic des sessions échouées
 ############################################
 
 if [ "${#FAILED_IDX[@]}" -gt 0 ]; then
@@ -542,7 +601,7 @@ if [ "${#FAILED_IDX[@]}" -gt 0 ]; then
 fi
 
 ############################################
-# 9. Route par défaut via ppp0 (seulement si ppp0 a une vraie IP)
+# 10. Route par défaut via ppp0 (seulement si ppp0 a une vraie IP)
 ############################################
 
 if is_valid_ppp_ip "$(get_ppp_ip ppp0)"; then
@@ -551,7 +610,7 @@ if is_valid_ppp_ip "$(get_ppp_ip ppp0)"; then
 fi
 
 ############################################
-# 10. Mini serveur HTTP pour proxies.txt
+# 11. Mini serveur HTTP pour proxies.txt
 ############################################
 
 IP_PUBLIC="$LISTEN_IP"
@@ -568,7 +627,7 @@ else
 fi
 
 ############################################
-# 11. Démarrage des instances 3proxy
+# 12. Démarrage des instances 3proxy
 ############################################
 
 echo
@@ -589,7 +648,7 @@ echo
 echo "Done."
 
 ############################################
-# 12. Vérification initiale des proxies
+# 13. Vérification initiale des proxies
 ############################################
 
 echo -e "Running initial proxy verification (keeping only ${GREEN}STATUS OK${RESET} proxies)..."
@@ -642,7 +701,7 @@ echo
 echo "Starting live proxy health check (Ctrl+C to stop)..."
 
 ############################################
-# 13. Boucle de health-check live
+# 14. Boucle de health-check live
 ############################################
 
 while true; do
