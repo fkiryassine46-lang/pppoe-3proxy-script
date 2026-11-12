@@ -3,6 +3,50 @@
 set -e
 
 ############################################
+# -1. Mode "regen headless" (piloté par le dashboard)
+############################################
+# Si REGEN_STATUS_FILE est définie, le script tourne en mode régénération
+# pour le dashboard : aucune question interactive, la progression est écrite
+# en JSON dans ce fichier, et le script SORT après la vérification (pas de
+# boucle health-check infinie). Les proxies (pppd + 3proxy) continuent de
+# tourner en arrière-plan. Sans cette variable, comportement inchangé.
+REGEN_STATUS_FILE="${REGEN_STATUS_FILE:-}"
+REGEN_DONE=0
+
+json_escape() {
+    local s="$1"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    printf '%s' "$s"
+}
+
+write_status() {
+    [ -z "$REGEN_STATUS_FILE" ] && return 0
+    local state="$1" phase="$2" pct="$3" detail="$4" okc="${5:-0}" total="${6:-0}"
+    local tmp="${REGEN_STATUS_FILE}.tmp"
+    {
+        printf '{'
+        printf '"state":"%s",' "$(json_escape "$state")"
+        printf '"phase":"%s",' "$(json_escape "$phase")"
+        printf '"pct":%s,' "${pct:-0}"
+        printf '"detail":"%s",' "$(json_escape "$detail")"
+        printf '"ok":%s,' "${okc:-0}"
+        printf '"total":%s,' "${total:-0}"
+        printf '"pid":%s,' "$$"
+        printf '"ts":"%s"' "$(date -Is 2>/dev/null)"
+        printf '}'
+    } > "$tmp" 2>/dev/null && mv "$tmp" "$REGEN_STATUS_FILE" 2>/dev/null || true
+}
+
+regen_exit_trap() {
+    local rc=$?
+    if [ -n "$REGEN_STATUS_FILE" ] && [ "$REGEN_DONE" -ne 1 ] && [ "$rc" -ne 0 ]; then
+        write_status "error" "Failed" 100 "Generation stopped (code $rc)" "${PH2_OK:-0}" "${COUNT:-0}"
+    fi
+}
+trap regen_exit_trap EXIT
+
+############################################
 # 0. Licence check avec barre de progression
 ############################################
 
@@ -265,6 +309,7 @@ fi
 ############################################
 
 echo "$(date) - Cleaning old configuration..."
+write_status "running" "Stopping old proxies" 6 "Releasing current PPPoE sessions..." 0 0
 
 pkill 3proxy >/dev/null 2>&1 || true
 pkill -f "http.server 1991" >/dev/null 2>&1 || true
@@ -325,6 +370,7 @@ fi
 ############################################
 
 echo "Probing the line (detecting BRAS / Access Concentrators)..."
+write_status "running" "Probing line" 12 "Detecting BRAS (Access Concentrators)..." 0 0
 
 # macvlan0 sert de sonde (et sera reutilisee comme 1re vraie macvlan)
 if ! create_macvlan 0; then
@@ -373,18 +419,28 @@ MAX_TOTAL=$((MAX_MACS * SESSIONS_PER_MAC))
 ############################################
 
 echo
-echo -e "This line supports at most ${GREEN}${MAX_TOTAL}${RESET} STABLE proxies"
-echo -e "  (${MAX_MACS} MAC x ${SESSIONS_PER_MAC} BRAS)."
-echo
-read -r -p "How many proxies do you want to generate? [default: ${MAX_TOTAL}]: " USER_COUNT
-
-if [ -z "$USER_COUNT" ]; then
-    COUNT="$MAX_TOTAL"
-elif [[ "$USER_COUNT" =~ ^[0-9]+$ ]] && [ "$USER_COUNT" -gt 0 ]; then
-    COUNT="$USER_COUNT"
+if [ -n "$REGEN_STATUS_FILE" ]; then
+    # Mode headless : pas de question. On prend PROXY_COUNT, sinon le max.
+    if [[ "${PROXY_COUNT:-}" =~ ^[0-9]+$ ]] && [ "${PROXY_COUNT}" -gt 0 ]; then
+        COUNT="$PROXY_COUNT"
+    else
+        COUNT="$MAX_TOTAL"
+    fi
+    echo "Headless regen mode: COUNT=${COUNT}"
 else
-    echo "Invalid number, using ${MAX_TOTAL}."
-    COUNT="$MAX_TOTAL"
+    echo -e "This line supports at most ${GREEN}${MAX_TOTAL}${RESET} STABLE proxies"
+    echo -e "  (${MAX_MACS} MAC x ${SESSIONS_PER_MAC} BRAS)."
+    echo
+    read -r -p "How many proxies do you want to generate? [default: ${MAX_TOTAL}]: " USER_COUNT
+
+    if [ -z "$USER_COUNT" ]; then
+        COUNT="$MAX_TOTAL"
+    elif [[ "$USER_COUNT" =~ ^[0-9]+$ ]] && [ "$USER_COUNT" -gt 0 ]; then
+        COUNT="$USER_COUNT"
+    else
+        echo "Invalid number, using ${MAX_TOTAL}."
+        COUNT="$MAX_TOTAL"
+    fi
 fi
 
 if [ "$COUNT" -gt "$MAX_TOTAL" ]; then
@@ -447,6 +503,10 @@ for i in $(seq 0 $((COUNT - 1))); do
 
     PH1_DONE=$((PH1_DONE + 1))
     progress_bar "$PH1_DONE" "$COUNT" "Phase 1" "$GREEN" "$GREEN_BG"
+    if [ -n "$REGEN_STATUS_FILE" ]; then
+        PCT=$(( 15 + PH1_DONE * 40 / COUNT ))
+        write_status "running" "Creating sessions" "$PCT" "Starting session ${PH1_DONE}/${COUNT}" 0 "$COUNT"
+    fi
 
     sleep "$START_DELAY"
 done
@@ -536,6 +596,10 @@ for i in $(seq 0 $((COUNT - 1))); do
 
     PH2_DONE=$((PH2_DONE + 1))
     progress_bar "$PH2_DONE" "$COUNT" "Phase 2" "$PINK" "$PINK_BG"
+    if [ -n "$REGEN_STATUS_FILE" ]; then
+        PCT=$(( 55 + PH2_DONE * 20 / COUNT ))
+        write_status "running" "Bringing up sessions" "$PCT" "${PH2_OK}/${COUNT} sessions up" "$PH2_OK" "$COUNT"
+    fi
 done
 
 echo
@@ -549,6 +613,7 @@ echo -e "First pass: ${GREEN}${PH2_OK}${RESET} up, ${YELLOW}${#PENDING[@]}${RESE
 ROUND=1
 while [ "${#PENDING[@]}" -gt 0 ] && [ "$ROUND" -le "$RETRY_ROUNDS" ]; do
     echo -e "${YELLOW}Retry round ${ROUND}/${RETRY_ROUNDS}: ${#PENDING[@]} sessions pending, waiting ${RETRY_WAIT}s...${RESET}"
+    [ -n "$REGEN_STATUS_FILE" ] && write_status "running" "Recovering sessions" 77 "Retry ${ROUND}/${RETRY_ROUNDS} - ${#PENDING[@]} pending" "$PH2_OK" "$COUNT"
     sleep "$RETRY_WAIT"
 
     STILL=()
@@ -615,7 +680,9 @@ fi
 
 IP_PUBLIC="$LISTEN_IP"
 
-if command -v python3 >/dev/null 2>&1; then
+if [ -n "$REGEN_STATUS_FILE" ]; then
+    echo "Headless regen: skipping built-in HTTP server (dashboard serves the file)."
+elif command -v python3 >/dev/null 2>&1; then
     echo "Server Ready For ${PROXY_LIST_FILE} (ALL interfaces):"
     (
         cd "$(dirname "$PROXY_LIST_FILE")" || exit 1
@@ -652,10 +719,12 @@ echo "Done."
 ############################################
 
 echo -e "Running initial proxy verification (keeping only ${GREEN}STATUS OK${RESET} proxies)..."
+[ -n "$REGEN_STATUS_FILE" ] && write_status "running" "Verifying proxies" 82 "Testing each proxy..." 0 "$COUNT"
 
 TMP_FILE=$(mktemp)
 EXPORT_OK=0
 EXPORT_FAIL=0
+VERIFY_DONE=0
 
 while IFS=':' read -r HOST PORT USER PASS; do
     [ -z "$HOST" ] && continue
@@ -686,6 +755,13 @@ while IFS=':' read -r HOST PORT USER PASS; do
             echo -e "${HOST}:${PORT} -> ${PUBLIC_IP} ${RED}STATUS MISMATCH (REMOVED)${RESET}"
         fi
     fi
+
+    if [ -n "$REGEN_STATUS_FILE" ]; then
+        VERIFY_DONE=$((VERIFY_DONE + 1))
+        PCT=$(( 82 + VERIFY_DONE * 16 / COUNT ))
+        [ "$PCT" -gt 98 ] && PCT=98
+        write_status "running" "Verifying proxies" "$PCT" "${EXPORT_OK} OK so far" "$EXPORT_OK" "$COUNT"
+    fi
 done < "$PROXY_LIST_RAW"
 
 mv "$TMP_FILE" "$PROXY_LIST_FILE"
@@ -696,6 +772,13 @@ echo -e "  ${GREEN}OK proxies kept${RESET} : ${EXPORT_OK}"
 echo -e "  ${RED}Removed (bad)${RESET}    : ${EXPORT_FAIL}"
 
 echo "Proxy list available in: ${PROXY_LIST_FILE}"
+
+if [ -n "$REGEN_STATUS_FILE" ]; then
+    REGEN_DONE=1
+    write_status "done" "Completed" 100 "${EXPORT_OK} new proxies ready" "$EXPORT_OK" "$COUNT"
+    echo "Headless regen finished: ${EXPORT_OK} proxies. Exiting (proxies keep running)."
+    exit 0
+fi
 
 echo
 echo "Starting live proxy health check (Ctrl+C to stop)..."
