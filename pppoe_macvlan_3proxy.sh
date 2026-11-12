@@ -315,7 +315,7 @@ mkdir -p /var/log/3proxy
 
 # Options PADI plus patientes si la version de pppd les supporte
 PADI_OPTS=""
-if pppd plugin rp-pppoe.so "$WAN_IF" pppoe-padi-timeout 10 pppoe-padi-attempts 4 dryrun >/dev/null 2>&1; then
+if pppd plugin rp-pppoe.so "$WAN_IF" noauth pppoe-padi-timeout 10 pppoe-padi-attempts 4 dryrun >/dev/null 2>&1; then
     PADI_OPTS="pppoe-padi-timeout 10
 pppoe-padi-attempts 4"
 fi
@@ -348,7 +348,7 @@ fi
 
 # Est-ce que pppd sait epingler une session a un BRAS precis ?
 AC_OPT_OK=0
-if pppd plugin rp-pppoe.so macvlan0 rp_pppoe_ac "${AC_NAMES[0]}" dryrun >/dev/null 2>&1; then
+if pppd plugin rp-pppoe.so macvlan0 noauth rp_pppoe_ac "${AC_NAMES[0]}" dryrun >/dev/null 2>&1; then
     AC_OPT_OK=1
     echo -e "  -> BRAS pinning (rp_pppoe_ac): ${GREEN}supported${RESET}"
 else
