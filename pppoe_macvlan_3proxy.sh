@@ -7,7 +7,6 @@ set -e
 ############################################
 
 BAR_WIDTH=30
-BAR_CHAR="#"
 
 GREEN="\e[32m"
 RED="\e[31m"
@@ -17,7 +16,6 @@ ORANGE='\e[38;5;208m'
 PINK='\e[35m'
 BLUE='\e[34m'
 
-# couleurs de fond pour les barres type "rectangle plein"
 GREEN_BG="\e[42m"
 PINK_BG="\e[45m"
 ORANGE_BG="\e[48;5;208m"
@@ -28,10 +26,7 @@ TMP_OUT=$(mktemp)
 LIC_PID=$!
 progress=0
 
-# Ligne vide avant la ligne "Checking licence..."
 printf "\n"
-
-# Affichage initial de la barre orange style "rectangle"
 printf "%bChecking licence...%b " "$RED" "$RESET"
 printf "%b[" "$ORANGE"
 printf "%b%*s%b" "$ORANGE_BG" "$BAR_WIDTH" "" "$RESET"
@@ -41,16 +36,13 @@ while kill -0 "$LIC_PID" 2>/dev/null; do
     if [ "$progress" -lt "$BAR_WIDTH" ]; then
         progress=$((progress + 1))
     fi
-
     filled=$(printf "%*s" "$progress" "")
     empty=$(printf "%*s" "$((BAR_WIDTH - progress))" "")
-
     printf "\r%bChecking licence...%b " "$RED" "$RESET"
     printf "%b[" "$ORANGE"
     printf "%b%s%b" "$ORANGE_BG" "$filled" "$RESET"
     printf "%s" "$empty"
     printf "%b]%b" "$ORANGE" "$RESET"
-
     sleep 0.1
 done
 
@@ -83,14 +75,11 @@ progress_bar() {
     local current="$1"
     local total="$2"
     local label="$3"
-    local color_fg="$4"   # couleur du texte/bordure
-    local color_bg="$5"   # couleur de remplissage du rectangle
+    local color_fg="$4"
+    local color_bg="$5"
     local width=40
 
-    if [ "$total" -le 0 ]; then
-        total=1
-    fi
-
+    [ "$total" -le 0 ] && total=1
     [ -z "$color_fg" ] && color_fg="$RESET"
     [ -z "$color_bg" ] && color_bg="$color_fg"
 
@@ -99,23 +88,15 @@ progress_bar() {
     local filled=$(( current * width / total ))
     local empty=$(( width - filled ))
 
-    local bar_filled
-    local bar_empty
+    local bar_filled bar_empty
     bar_filled=$(printf "%*s" "$filled" "")
     bar_empty=$(printf "%*s" "$empty" "")
 
-    # Style "Loading..." : rectangle plein coloré + % à droite
-    # -> label coloré aussi (Phase 1 / Phase 2)
     printf "\r%b%s%b " "$color_fg" "$label" "$RESET"
-    # bordure gauche
     printf "%b[" "$color_fg"
-    # partie remplie : fond coloré
     printf "%b%s%b" "$color_bg" "$bar_filled" "$RESET"
-    # partie vide : fond normal
     printf "%s" "$bar_empty"
-    # bordure droite
     printf "%b]%b " "$color_fg" "$RESET"
-    # pourcentage à droite, même couleur que la bordure
     printf "%b%3d%%%b" "$color_fg" "$percent" "$RESET"
 }
 
@@ -144,54 +125,74 @@ echo
 # 2. Config globale
 ############################################
 
-# Interface WAN physique
 WAN_IF="ens160"
 
-# Instances 3proxy (multi-port)
-BASE_PORT1=30000          # Instance 1 base port
-BASE_PORT2=60000          # Instance 2 base port
-MAX_PER_INSTANCE=1000     # Max proxies sur instance 1 (et 2)
+BASE_PORT1=30000
+BASE_PORT2=60000
+MAX_PER_INSTANCE=1000
 
-PARALLEL_START=50         # Nb de PPP à démarrer avant petite pause
+# --- Rythme de démarrage PPPoE (le BRAS du FAI limite le débit de PADI) ---
+BATCH_SIZE=10             # nb de sessions lancées avant une pause
+BATCH_PAUSE=3             # pause (s) entre deux lots
+START_DELAY=0.3           # pause (s) entre chaque session
 
-# ID de base des tables de routage
+# --- Attente d'une vraie IP publique par session (Phase 2) ---
+WAIT_IP=45                # secondes max par session
+
+# --- Délai après arrêt des anciennes sessions (libération côté FAI) ---
+CLEAN_WAIT=10
+
+# --- MAC fixes par macvlan (1 = MAC stable à chaque démarrage, 0 = aléatoire) ---
+USE_FIXED_MAC=1
+
 TABLE_BASE=9000
 
-# PPP credentials
 PPP_USER="centre04"
 PPP_PASS="centre04"
 
-# Fichiers et binaires
-PROXY_LIST_RAW="/root/proxies_raw.txt"   # liste interne brute
-PROXY_LIST_FILE="/root/proxies.txt"      # liste finale publique
+PROXY_LIST_RAW="/root/proxies_raw.txt"
+PROXY_LIST_FILE="/root/proxies.txt"
 
 THREEPROXY_BIN="/usr/local/bin/3proxy"
 THREEPROXY_CFG1="/usr/local/etc/3proxy/3proxy1.cfg"
 THREEPROXY_CFG2="/usr/local/etc/3proxy/3proxy2.cfg"
 
-# Map port TCP proxy -> index PPP (pppX)
 get_ppp_index_from_port() {
     local port="$1"
-
     if (( port >= BASE_PORT1 && port < BASE_PORT1 + MAX_PER_INSTANCE )); then
-        echo $(( port - BASE_PORT1 ))
-        return 0
+        echo $(( port - BASE_PORT1 )); return 0
     fi
-
     if (( port >= BASE_PORT2 && port < BASE_PORT2 + MAX_PER_INSTANCE )); then
-        echo $(( port - BASE_PORT2 + MAX_PER_INSTANCE ))
-        return 0
+        echo $(( port - BASE_PORT2 + MAX_PER_INSTANCE )); return 0
     fi
+    echo "-1"; return 1
+}
 
-    echo "-1"
-    return 1
+# Une IP PPP est valide seulement si ce n'est PAS une adresse "bidon".
+# 10.64.64.x / 10.112.112.x = adresses temporaires que pppd met sur
+# l'interface tant que la session n'est PAS réellement établie.
+is_valid_ppp_ip() {
+    case "$1" in
+        ""|10.64.64.*|10.112.112.*|169.254.*|0.0.0.0) return 1 ;;
+    esac
+    return 0
+}
+
+get_ppp_ip() {
+    ip -4 addr show dev "$1" 2>/dev/null | awk '/inet / {print $2}' | cut -d/ -f1 | head -n1
+}
+
+# Arrête la session pppd d'un index (évite qu'elle re-tente à l'infini
+# et inonde le FAI de demandes PPPoE)
+stop_ppp_session() {
+    pkill -f "pppd call pppoe${1}\$" >/dev/null 2>&1 || true
 }
 
 ############################################
 # 3. Détection IP locale sur WAN_IF
 ############################################
 
-LISTEN_IP=$(ip -4 addr show dev "$WAN_IF" | awk '/inet / {print $2}' | cut -d/ -f1 | head -n1)
+LISTEN_IP=$(get_ppp_ip "$WAN_IF")
 
 if [ -z "$LISTEN_IP" ]; then
     echo "Unable to automatically detect IP address on ${WAN_IF}"
@@ -212,21 +213,44 @@ if ! ip link show "$WAN_IF" >/dev/null 2>&1; then
 fi
 
 ############################################
-# 4. Cleanup anciennes configs + macvlans
+# 4. Cleanup propre (sessions, règles, macvlans)
 ############################################
 
 echo "$(date) - Cleaning old configuration..."
 
-pkill 3proxy  >/dev/null 2>&1 || true
-pkill pppd    >/dev/null 2>&1 || true
+pkill 3proxy >/dev/null 2>&1 || true
+pkill -f "http.server 1991" >/dev/null 2>&1 || true
+
+# Arrêt PROPRE de pppd : SIGTERM => pppd envoie un PADT au FAI
+# et libère la session côté Maroc Telecom (sinon sessions fantômes).
+if pgrep -x pppd >/dev/null 2>&1; then
+    pkill -TERM -x pppd >/dev/null 2>&1 || true
+    for _ in $(seq 1 20); do
+        pgrep -x pppd >/dev/null 2>&1 || break
+        sleep 1
+    done
+    pkill -KILL -x pppd >/dev/null 2>&1 || true
+    echo "  -> Waiting ${CLEAN_WAIT}s so the ISP releases old sessions..."
+    sleep "$CLEAN_WAIT"
+fi
 
 MAX_CLEAN=$((COUNT + 500))
 
-for i in $(seq 0 "$MAX_CLEAN"); do
-    ip link show "macvlan$i" >/dev/null 2>&1 && ip link delete "macvlan$i" || true
+# Suppression des anciennes règles de routage (prio 9000..)
+for p in $(ip rule show | awk -F: '{print $1+0}' | sort -un); do
+    if [ "$p" -ge 9000 ] && [ "$p" -lt $((9000 + MAX_CLEAN)) ]; then
+        while ip rule del priority "$p" >/dev/null 2>&1; do :; done
+        ip route flush table $((TABLE_BASE + p - 9000)) >/dev/null 2>&1 || true
+    fi
+done
+
+# Suppression des anciens macvlans (APRÈS l'arrêt de pppd)
+for ifc in $(ip -o link show type macvlan 2>/dev/null | awk -F': ' '{print $2}' | cut -d@ -f1 | grep '^macvlan' || true); do
+    ip link delete "$ifc" >/dev/null 2>&1 || true
 done
 
 : > "$PROXY_LIST_RAW"
+rm -f /var/log/pppoe_*.log
 
 ############################################
 # 5. PPP secrets
@@ -234,7 +258,7 @@ done
 
 for f in /etc/ppp/chap-secrets /etc/ppp/pap-secrets; do
     if [ -f "$f" ]; then
-        if ! grep -q "[[:space:]]${PPP_USER}[[:space:]]" "$f" 2>/dev/null; then
+        if ! grep -q "^${PPP_USER}[[:space:]]" "$f" 2>/dev/null; then
             echo "${PPP_USER} * ${PPP_PASS} *" >>"$f"
         fi
     fi
@@ -248,31 +272,21 @@ mkdir -p /var/log/3proxy
 # 6. Configs 3proxy (deux instances)
 ############################################
 
-cat >"$THREEPROXY_CFG1" <<'EOF1'
+for n in 1 2; do
+    CFG_VAR="THREEPROXY_CFG$n"
+    cat >"${!CFG_VAR}" <<EOF
 daemon
 maxconn 15000
 nserver 81.192.17.62
 nserver 8.8.8.8
 nscache 65536
-log /var/log/3proxy/log1.log D
+log /var/log/3proxy/log$n.log D
 logformat "L%Y-%m-%d %H:%M:%S %E %U %C:%c %R:%r %O %I %h %T"
 timeouts 1 5 30 60 180 1000 15 60
 auth none
 allow *
-EOF1
-
-cat >"$THREEPROXY_CFG2" <<'EOF2'
-daemon
-maxconn 15000
-nserver 81.192.17.62
-nserver 8.8.8.8
-nscache 65536
-log /var/log/3proxy/log2.log D
-logformat "L%Y-%m-%d %H:%M:%S %E %U %C:%c %R:%r %O %I %h %T"
-timeouts 1 5 30 60 180 1000 15 60
-auth none
-allow *
-EOF2
+EOF
+done
 
 ############################################
 # 7. Phase 1 - Création des sessions PPPoE
@@ -288,7 +302,16 @@ PH1_DONE=0
 for i in $(seq 0 $((COUNT - 1))); do
     MACVLAN_IF="macvlan$i"
 
-    if ! ip link add link "$WAN_IF" name "$MACVLAN_IF" type macvlan mode bridge 2>/dev/null; then
+    if [ "$USE_FIXED_MAC" -eq 1 ]; then
+        MAC=$(printf "02:4d:54:%02x:%02x:%02x" $(( (i >> 16) & 255 )) $(( (i >> 8) & 255 )) $(( i & 255 )))
+        ADD_OK=0
+        ip link add link "$WAN_IF" name "$MACVLAN_IF" address "$MAC" type macvlan mode bridge 2>/dev/null && ADD_OK=1
+    else
+        ADD_OK=0
+        ip link add link "$WAN_IF" name "$MACVLAN_IF" type macvlan mode bridge 2>/dev/null && ADD_OK=1
+    fi
+
+    if [ "$ADD_OK" -ne 1 ]; then
         echo
         echo "!!! Failed to create ${MACVLAN_IF}"
         continue
@@ -298,6 +321,9 @@ for i in $(seq 0 $((COUNT - 1))); do
 
     PEER_FILE="/etc/ppp/peers/pppoe$i"
 
+    # IMPORTANT : plus de "demand" ni "idle 0".
+    # Avec "demand", pppd crée ppp$i tout de suite avec une fausse IP
+    # 10.64.64.(64+i) AVANT que la session existe => proxies morts.
     cat >"$PEER_FILE" <<EOF
 plugin rp-pppoe.so
 $MACVLAN_IF
@@ -307,33 +333,29 @@ usepeerdns
 mtu 1492
 mru 1492
 
-idle 0
-demand
-
-# Keep the PPP session alive and reconnect automatically
 lcp-echo-interval 30
 lcp-echo-failure 10
 persist
 maxfail 0
-holdoff 5
+holdoff 30
+noipdefault
 ipcp-accept-local
 ipcp-accept-remote
 noccp
 user "$PPP_USER"
 password "$PPP_PASS"
 unit $i
+logfile /var/log/pppoe_$i.log
 EOF
 
-    pppd call "pppoe$i" >/var/log/pppoe_$i.log 2>&1 &
+    pppd call "pppoe$i" >/dev/null 2>&1 &
 
-    if (((i + 1) % PARALLEL_START == 0)); then
-        sleep 1
+    if (((i + 1) % BATCH_SIZE == 0)); then
+        sleep "$BATCH_PAUSE"
     fi
-
-    sleep 0.1
+    sleep "$START_DELAY"
 
     PH1_DONE=$((PH1_DONE + 1))
-    # Barre verte style rectangle + % vert, texte "Phase 1" en vert
     progress_bar "$PH1_DONE" "$COUNT" "Phase 1" "$GREEN" "$GREEN_BG"
 done
 
@@ -348,35 +370,32 @@ echo "Phase 2: configuring routes and proxies..."
 echo
 
 PH2_DONE=0
+PH2_OK=0
+FAILED_IDX=()
 
 for i in $(seq 0 $((COUNT - 1))); do
     PPP_IF="ppp$i"
     MACVLAN_IF="macvlan$i"
 
-    TIMEOUT=60
-    while ! ip addr show "$PPP_IF" >/dev/null 2>&1 && [ "$TIMEOUT" -gt 0 ]; do
-        sleep 1
-        TIMEOUT=$((TIMEOUT - 1))
-    done
-
-    if ! ip addr show "$PPP_IF" >/dev/null 2>&1; then
-        echo
-        echo "!!! PPPoE failed on ${MACVLAN_IF} (${PPP_IF} not created)"
-        continue
-    fi
-
+    # Attente d'une VRAIE IP (pas 10.64.64.x)
     IP_PPP=""
-    TIMEOUT_IP=30
-    while [ -z "$IP_PPP" ] && [ "$TIMEOUT_IP" -gt 0 ]; do
-        IP_PPP=$(ip -4 addr show dev "$PPP_IF" | awk '/inet / {print $2}' | cut -d/ -f1 | head -n1)
-        [ -n "$IP_PPP" ] && break
+    T=0
+    while [ "$T" -lt "$WAIT_IP" ]; do
+        IP_PPP=$(get_ppp_ip "$PPP_IF")
+        is_valid_ppp_ip "$IP_PPP" && break
+        IP_PPP=""
         sleep 1
-        TIMEOUT_IP=$((TIMEOUT_IP - 1))
+        T=$((T + 1))
     done
+
+    PH2_DONE=$((PH2_DONE + 1))
 
     if [ -z "$IP_PPP" ]; then
         echo
-        echo "!!! Unable to get IP on ${PPP_IF} (timeout)"
+        echo -e "${RED}!!! PPPoE session not established on ${PPP_IF} (see /var/log/pppoe_${i}.log) -> session stopped${RESET}"
+        stop_ppp_session "$i"
+        FAILED_IDX+=("$i")
+        progress_bar "$PH2_DONE" "$COUNT" "Phase 2" "$PINK" "$PINK_BG"
         continue
     fi
 
@@ -385,55 +404,36 @@ for i in $(seq 0 $((COUNT - 1))); do
             echo
             echo "!!! Warning: connectivity test FAILED on ${PPP_IF} (${IP_PPP})"
             echo "    -> Keeping this session anyway (it will be tested as proxy later)."
-            # Ligne vide après le bloc de warning pour espacer avec la barre Phase 2
             echo
         fi
     fi
 
-    ########################################
-    # Table et règle de routage dédiées
-    ########################################
-
     TABLE_ID=$((TABLE_BASE + i))
     PRIO=$((9000 + i))
 
-    # 1) Supprime l’ancienne règle pour cet index (par priority, même si l’IP a changé)
     ip rule del priority "$PRIO" >/dev/null 2>&1 || true
-
-    # 2) Flush la table
     ip route flush table "$TABLE_ID" >/dev/null 2>&1 || true
 
-    # 3) Route host /32 vers PPP
     if ! ip route add "$IP_PPP"/32 dev "$PPP_IF" table "$TABLE_ID" >/dev/null 2>&1; then
-        echo
-        echo "!!! Failed to add host route ${IP_PPP}/32 via ${PPP_IF} (interface probably went down)"
-        continue
+        echo; echo "!!! Failed to add host route ${IP_PPP}/32 via ${PPP_IF}"
+        FAILED_IDX+=("$i"); continue
     fi
 
-    # 4) Route par défaut via PPP dans sa table
     if ! ip route add default dev "$PPP_IF" table "$TABLE_ID" >/dev/null 2>&1; then
-        echo
-        echo "!!! Failed to add default route via ${PPP_IF}"
-        continue
+        echo; echo "!!! Failed to add default route via ${PPP_IF}"
+        FAILED_IDX+=("$i"); continue
     fi
 
-    # 5) Règle avec priorité fixe (liée à l’index PPP)
     if ! ip rule add from "$IP_PPP" table "$TABLE_ID" priority "$PRIO" >/dev/null 2>&1; then
-        echo
-        echo "!!! Failed to add ip rule from ${IP_PPP} for table ${TABLE_ID}"
-        continue
+        echo; echo "!!! Failed to add ip rule from ${IP_PPP} for table ${TABLE_ID}"
+        FAILED_IDX+=("$i"); continue
     fi
-
-    ########################################
-    # Mapping 3proxy (multi-port)
-    ########################################
 
     if [ "$i" -lt "$MAX_PER_INSTANCE" ]; then
         PORT=$((BASE_PORT1 + i))
         echo "proxy -a -p${PORT} -i0.0.0.0 -e${IP_PPP}" >>"$THREEPROXY_CFG1"
     else
-        INDEX2=$((i - MAX_PER_INSTANCE))
-        PORT=$((BASE_PORT2 + INDEX2))
+        PORT=$((BASE_PORT2 + i - MAX_PER_INSTANCE))
         echo "proxy -a -p${PORT} -i0.0.0.0 -e${IP_PPP}" >>"$THREEPROXY_CFG2"
     fi
 
@@ -443,22 +443,36 @@ for i in $(seq 0 $((COUNT - 1))); do
     fi
 
     echo "${IP_PPP}:${PORT}:fibre123:fibrebe123" >>"$PROXY_LIST_RAW"
+    PH2_OK=$((PH2_OK + 1))
 
-    PH2_DONE=$((PH2_DONE + 1))
-    # Barre rose style rectangle + % rose, texte "Phase 2" en rose
     progress_bar "$PH2_DONE" "$COUNT" "Phase 2" "$PINK" "$PINK_BG"
 done
 
 echo
 echo
+echo -e "PPPoE sessions established: ${GREEN}${PH2_OK}${RESET} / ${COUNT}"
 
 ############################################
-# 9. Route par défaut via ppp0 (optionnel)
+# 8b. Diagnostic des sessions échouées
 ############################################
 
-if ip link show ppp0 >/dev/null 2>&1; then
+if [ "${#FAILED_IDX[@]}" -gt 0 ]; then
+    echo -e "${RED}Failed PPPoE sessions: ${#FAILED_IDX[@]}${RESET}"
+    echo -e "${YELLOW}Reasons found in pppd logs:${RESET}"
+    for i in "${FAILED_IDX[@]}"; do
+        grep -hoiE "Timeout waiting for PAD[OS] packets|PAP authentication failed|CHAP authentication failed|Generic-Error.*|AC-System-Error.*|Service-Name-Error.*|No response to [0-9]+ echo-requests|LCP: timeout.*|Connection terminated|Modem hangup" \
+            "/var/log/pppoe_${i}.log" 2>/dev/null | head -n1 || echo "(no clear reason in log)"
+    done | sort | uniq -c | sort -rn
+    echo
+fi
+
+############################################
+# 9. Route par défaut via ppp0 (seulement si ppp0 a une vraie IP)
+############################################
+
+if is_valid_ppp_ip "$(get_ppp_ip ppp0)"; then
     ip route del default dev "$WAN_IF" >/dev/null 2>&1 || true
-    ip route add default dev ppp0       >/dev/null 2>&1 || true
+    ip route add default dev ppp0 >/dev/null 2>&1 || true
 fi
 
 ############################################
@@ -485,16 +499,17 @@ fi
 echo
 echo "Starting 3proxy with generated configurations..."
 
-if [ -s "$THREEPROXY_CFG1" ]; then
+if grep -q '^proxy ' "$THREEPROXY_CFG1"; then
     "$THREEPROXY_BIN" "$THREEPROXY_CFG1" &
     echo " -> 3proxy instance 1 started (ports from ${BASE_PORT1})"
 fi
 
-if [ -s "$THREEPROXY_CFG2" ]; then
+if grep -q '^proxy ' "$THREEPROXY_CFG2"; then
     "$THREEPROXY_BIN" "$THREEPROXY_CFG2" &
     echo " -> 3proxy instance 2 started (ports from ${BASE_PORT2})"
 fi
 
+sleep 2
 echo
 echo "Done."
 
@@ -529,8 +544,10 @@ while IFS=':' read -r HOST PORT USER PASS; do
         echo -e "${HOST}:${PORT} -> ${PUBLIC_IP} ${GREEN}STATUS OK (KEPT)${RESET}"
     else
         EXPORT_FAIL=$((EXPORT_FAIL+1))
+        IDX=$(get_ppp_index_from_port "$PORT" || true)
+        NOW_IP=$(get_ppp_ip "ppp${IDX}")
         if [ -z "$PUBLIC_IP" ]; then
-            echo -e "${HOST}:${PORT} -> ${RED}STATUS FAIL (no response, REMOVED)${RESET}"
+            echo -e "${HOST}:${PORT} -> ${RED}STATUS FAIL (no response, REMOVED)${RESET} [ppp${IDX} now: ${NOW_IP:-down}]"
         else
             echo -e "${HOST}:${PORT} -> ${PUBLIC_IP} ${RED}STATUS MISMATCH (REMOVED)${RESET}"
         fi
@@ -538,6 +555,7 @@ while IFS=':' read -r HOST PORT USER PASS; do
 done < "$PROXY_LIST_RAW"
 
 mv "$TMP_FILE" "$PROXY_LIST_FILE"
+chmod 644 "$PROXY_LIST_FILE"
 
 echo "Initial export filter summary:"
 echo -e "  ${GREEN}OK proxies kept${RESET} : ${EXPORT_OK}"
@@ -585,7 +603,6 @@ while true; do
             FAIL_COUNT=$((FAIL_COUNT+1))
             FAILED_LIST+="${HOST}:${PORT}\n"
         fi
-
     done < "$PROXY_LIST_FILE"
 
     TOTAL=$((OK_COUNT + FAIL_COUNT))
