@@ -131,18 +131,26 @@ BASE_PORT1=30000
 BASE_PORT2=60000
 MAX_PER_INSTANCE=1000
 
-# --- Rythme de démarrage PPPoE (le BRAS du FAI limite le débit de PADI) ---
-BATCH_SIZE=10             # nb de sessions lancées avant une pause
-BATCH_PAUSE=3             # pause (s) entre deux lots
-START_DELAY=0.3           # pause (s) entre chaque session
+# --- Rythme de démarrage PPPoE ---
+# Le BRAS Maroc Telecom (Huawei ME60) bloque temporairement si trop de
+# demandes PPPoE arrivent trop vite. Le script ralentit automatiquement
+# dès qu'il détecte des "Timeout waiting for PADO", puis ré-accélère.
+BATCH_SIZE=5              # nb de sessions lancées avant une pause
+BATCH_PAUSE=5             # pause normale (s) entre deux lots
+MAX_BATCH_PAUSE=60        # pause max (s) quand le BRAS sature
+START_DELAY=1             # pause (s) entre chaque session
 
-# --- Attente d'une vraie IP publique par session (Phase 2) ---
-WAIT_IP=45                # secondes max par session
+# --- Attente d'une vraie IP par session (Phase 2, 1er passage) ---
+WAIT_IP=20
 
-# --- Délai après arrêt des anciennes sessions (libération côté FAI) ---
+# --- Nouvelles tentatives pour les sessions ratées ---
+RETRY_ROUNDS=5            # nb de tours de rattrapage
+RETRY_WAIT=45             # attente (s) avant chaque tour
+
+# --- Délai après arrêt des anciennes sessions ---
 CLEAN_WAIT=10
 
-# --- MAC fixes par macvlan (1 = MAC stable à chaque démarrage, 0 = aléatoire) ---
+# --- MAC fixes par macvlan (1 = MAC stable, 0 = aléatoire) ---
 USE_FIXED_MAC=1
 
 TABLE_BASE=9000
@@ -168,9 +176,7 @@ get_ppp_index_from_port() {
     echo "-1"; return 1
 }
 
-# Une IP PPP est valide seulement si ce n'est PAS une adresse "bidon".
-# 10.64.64.x / 10.112.112.x = adresses temporaires que pppd met sur
-# l'interface tant que la session n'est PAS réellement établie.
+# IP valide = pas une adresse temporaire pppd (10.64.64.x / 10.112.112.x)
 is_valid_ppp_ip() {
     case "$1" in
         ""|10.64.64.*|10.112.112.*|169.254.*|0.0.0.0) return 1 ;;
@@ -182,10 +188,16 @@ get_ppp_ip() {
     ip -4 addr show dev "$1" 2>/dev/null | awk '/inet / {print $2}' | cut -d/ -f1 | head -n1
 }
 
-# Arrête la session pppd d'un index (évite qu'elle re-tente à l'infini
-# et inonde le FAI de demandes PPPoE)
+ppp_session_running() {
+    pgrep -f "pppd call pppoe${1}\$" >/dev/null 2>&1
+}
+
 stop_ppp_session() {
     pkill -f "pppd call pppoe${1}\$" >/dev/null 2>&1 || true
+}
+
+count_pado_timeouts() {
+    cat /var/log/pppoe_*.log 2>/dev/null | grep -c "Timeout waiting for PADO" || true
 }
 
 ############################################
@@ -221,8 +233,7 @@ echo "$(date) - Cleaning old configuration..."
 pkill 3proxy >/dev/null 2>&1 || true
 pkill -f "http.server 1991" >/dev/null 2>&1 || true
 
-# Arrêt PROPRE de pppd : SIGTERM => pppd envoie un PADT au FAI
-# et libère la session côté Maroc Telecom (sinon sessions fantômes).
+# Arrêt PROPRE de pppd (PADT envoyé => sessions libérées chez le FAI)
 if pgrep -x pppd >/dev/null 2>&1; then
     pkill -TERM -x pppd >/dev/null 2>&1 || true
     for _ in $(seq 1 20); do
@@ -236,7 +247,6 @@ fi
 
 MAX_CLEAN=$((COUNT + 500))
 
-# Suppression des anciennes règles de routage (prio 9000..)
 for p in $(ip rule show | awk -F: '{print $1+0}' | sort -un); do
     if [ "$p" -ge 9000 ] && [ "$p" -lt $((9000 + MAX_CLEAN)) ]; then
         while ip rule del priority "$p" >/dev/null 2>&1; do :; done
@@ -244,7 +254,6 @@ for p in $(ip rule show | awk -F: '{print $1+0}' | sort -un); do
     fi
 done
 
-# Suppression des anciens macvlans (APRÈS l'arrêt de pppd)
 for ifc in $(ip -o link show type macvlan 2>/dev/null | awk -F': ' '{print $2}' | cut -d@ -f1 | grep '^macvlan' || true); do
     ip link delete "$ifc" >/dev/null 2>&1 || true
 done
@@ -267,6 +276,14 @@ done
 mkdir -p /etc/ppp/peers
 mkdir -p "$(dirname "$THREEPROXY_CFG1")"
 mkdir -p /var/log/3proxy
+
+# Options PADI plus patientes si la version de pppd les supporte
+# (sinon on ne les met pas, pour ne rien casser)
+PADI_OPTS=""
+if pppd plugin rp-pppoe.so "$WAN_IF" pppoe-padi-timeout 10 pppoe-padi-attempts 4 dryrun >/dev/null 2>&1; then
+    PADI_OPTS="pppoe-padi-timeout 10
+pppoe-padi-attempts 4"
+fi
 
 ############################################
 # 6. Configs 3proxy (deux instances)
@@ -298,16 +315,17 @@ echo "Phase 1: creating PPPoE sessions..."
 echo
 
 PH1_DONE=0
+CUR_PAUSE="$BATCH_PAUSE"
+LAST_TO=0
 
 for i in $(seq 0 $((COUNT - 1))); do
     MACVLAN_IF="macvlan$i"
 
+    ADD_OK=0
     if [ "$USE_FIXED_MAC" -eq 1 ]; then
         MAC=$(printf "02:4d:54:%02x:%02x:%02x" $(( (i >> 16) & 255 )) $(( (i >> 8) & 255 )) $(( i & 255 )))
-        ADD_OK=0
         ip link add link "$WAN_IF" name "$MACVLAN_IF" address "$MAC" type macvlan mode bridge 2>/dev/null && ADD_OK=1
     else
-        ADD_OK=0
         ip link add link "$WAN_IF" name "$MACVLAN_IF" type macvlan mode bridge 2>/dev/null && ADD_OK=1
     fi
 
@@ -319,14 +337,14 @@ for i in $(seq 0 $((COUNT - 1))); do
 
     ip link set "$MACVLAN_IF" up
 
-    PEER_FILE="/etc/ppp/peers/pppoe$i"
+    # holdoff étalé (30..59s) pour que les re-tentatives ne partent pas
+    # toutes en même temps vers le BRAS
+    HOLDOFF=$((30 + (i % 30)))
 
-    # IMPORTANT : plus de "demand" ni "idle 0".
-    # Avec "demand", pppd crée ppp$i tout de suite avec une fausse IP
-    # 10.64.64.(64+i) AVANT que la session existe => proxies morts.
-    cat >"$PEER_FILE" <<EOF
+    cat >"/etc/ppp/peers/pppoe$i" <<EOF
 plugin rp-pppoe.so
 $MACVLAN_IF
+$PADI_OPTS
 noauth
 nodefaultroute
 usepeerdns
@@ -337,7 +355,7 @@ lcp-echo-interval 30
 lcp-echo-failure 10
 persist
 maxfail 0
-holdoff 30
+holdoff $HOLDOFF
 noipdefault
 ipcp-accept-local
 ipcp-accept-remote
@@ -350,13 +368,26 @@ EOF
 
     pppd call "pppoe$i" >/dev/null 2>&1 &
 
-    if (((i + 1) % BATCH_SIZE == 0)); then
-        sleep "$BATCH_PAUSE"
-    fi
-    sleep "$START_DELAY"
-
     PH1_DONE=$((PH1_DONE + 1))
     progress_bar "$PH1_DONE" "$COUNT" "Phase 1" "$GREEN" "$GREEN_BG"
+
+    # Pause adaptative : si le BRAS ne répond plus (PADO timeout), on ralentit
+    if (((i + 1) % BATCH_SIZE == 0)); then
+        TO_NOW=$(count_pado_timeouts)
+        if [ "$TO_NOW" -gt "$LAST_TO" ]; then
+            CUR_PAUSE=$((CUR_PAUSE * 2))
+            [ "$CUR_PAUSE" -gt "$MAX_BATCH_PAUSE" ] && CUR_PAUSE="$MAX_BATCH_PAUSE"
+            printf " %b(ISP busy, pause %ss)%b   " "$YELLOW" "$CUR_PAUSE" "$RESET"
+        elif [ "$CUR_PAUSE" -gt "$BATCH_PAUSE" ]; then
+            CUR_PAUSE=$((CUR_PAUSE / 2))
+            [ "$CUR_PAUSE" -lt "$BATCH_PAUSE" ] && CUR_PAUSE="$BATCH_PAUSE"
+            printf "                        "
+        fi
+        LAST_TO="$TO_NOW"
+        sleep "$CUR_PAUSE"
+    else
+        sleep "$START_DELAY"
+    fi
 done
 
 echo
@@ -366,67 +397,41 @@ echo
 # 8. Phase 2 - PPP + routes + 3proxy
 ############################################
 
-echo "Phase 2: configuring routes and proxies..."
-echo
-
-PH2_DONE=0
 PH2_OK=0
 FAILED_IDX=()
+PENDING=()
 
-for i in $(seq 0 $((COUNT - 1))); do
-    PPP_IF="ppp$i"
-    MACVLAN_IF="macvlan$i"
-
-    # Attente d'une VRAIE IP (pas 10.64.64.x)
-    IP_PPP=""
-    T=0
-    while [ "$T" -lt "$WAIT_IP" ]; do
-        IP_PPP=$(get_ppp_ip "$PPP_IF")
-        is_valid_ppp_ip "$IP_PPP" && break
-        IP_PPP=""
-        sleep 1
-        T=$((T + 1))
-    done
-
-    PH2_DONE=$((PH2_DONE + 1))
-
-    if [ -z "$IP_PPP" ]; then
-        echo
-        echo -e "${RED}!!! PPPoE session not established on ${PPP_IF} (see /var/log/pppoe_${i}.log) -> session stopped${RESET}"
-        stop_ppp_session "$i"
-        FAILED_IDX+=("$i")
-        progress_bar "$PH2_DONE" "$COUNT" "Phase 2" "$PINK" "$PINK_BG"
-        continue
-    fi
+# Configure routage + 3proxy pour une session qui a une vraie IP
+configure_session() {
+    local i="$1"
+    local IP_PPP="$2"
+    local PPP_IF="ppp$i"
+    local TABLE_ID=$((TABLE_BASE + i))
+    local PRIO=$((9000 + i))
+    local PORT
 
     if command -v ping >/dev/null 2>&1; then
         if ! ping -I "$PPP_IF" -c 2 -W 3 8.8.8.8 >/dev/null 2>&1; then
             echo
             echo "!!! Warning: connectivity test FAILED on ${PPP_IF} (${IP_PPP})"
             echo "    -> Keeping this session anyway (it will be tested as proxy later)."
-            echo
         fi
     fi
-
-    TABLE_ID=$((TABLE_BASE + i))
-    PRIO=$((9000 + i))
 
     ip rule del priority "$PRIO" >/dev/null 2>&1 || true
     ip route flush table "$TABLE_ID" >/dev/null 2>&1 || true
 
     if ! ip route add "$IP_PPP"/32 dev "$PPP_IF" table "$TABLE_ID" >/dev/null 2>&1; then
         echo; echo "!!! Failed to add host route ${IP_PPP}/32 via ${PPP_IF}"
-        FAILED_IDX+=("$i"); continue
+        return 1
     fi
-
     if ! ip route add default dev "$PPP_IF" table "$TABLE_ID" >/dev/null 2>&1; then
         echo; echo "!!! Failed to add default route via ${PPP_IF}"
-        FAILED_IDX+=("$i"); continue
+        return 1
     fi
-
     if ! ip rule add from "$IP_PPP" table "$TABLE_ID" priority "$PRIO" >/dev/null 2>&1; then
         echo; echo "!!! Failed to add ip rule from ${IP_PPP} for table ${TABLE_ID}"
-        FAILED_IDX+=("$i"); continue
+        return 1
     fi
 
     if [ "$i" -lt "$MAX_PER_INSTANCE" ]; then
@@ -444,11 +449,81 @@ for i in $(seq 0 $((COUNT - 1))); do
 
     echo "${IP_PPP}:${PORT}:fibre123:fibrebe123" >>"$PROXY_LIST_RAW"
     PH2_OK=$((PH2_OK + 1))
+    return 0
+}
 
+echo "Phase 2: configuring routes and proxies..."
+echo
+
+PH2_DONE=0
+
+for i in $(seq 0 $((COUNT - 1))); do
+    IP_PPP=""
+    T=0
+    while [ "$T" -lt "$WAIT_IP" ]; do
+        IP_PPP=$(get_ppp_ip "ppp$i")
+        is_valid_ppp_ip "$IP_PPP" && break
+        IP_PPP=""
+        sleep 1
+        T=$((T + 1))
+    done
+
+    if [ -n "$IP_PPP" ]; then
+        configure_session "$i" "$IP_PPP" || FAILED_IDX+=("$i")
+    else
+        # Pas d'IP pour l'instant : pppd continue d'essayer tout seul,
+        # on revérifiera pendant les tours de rattrapage
+        PENDING+=("$i")
+    fi
+
+    PH2_DONE=$((PH2_DONE + 1))
     progress_bar "$PH2_DONE" "$COUNT" "Phase 2" "$PINK" "$PINK_BG"
 done
 
 echo
+echo
+echo -e "First pass: ${GREEN}${PH2_OK}${RESET} up, ${YELLOW}${#PENDING[@]}${RESET} pending"
+
+############################################
+# 8a. Tours de rattrapage des sessions ratées
+############################################
+
+ROUND=1
+while [ "${#PENDING[@]}" -gt 0 ] && [ "$ROUND" -le "$RETRY_ROUNDS" ]; do
+    echo -e "${YELLOW}Retry round ${ROUND}/${RETRY_ROUNDS}: ${#PENDING[@]} sessions pending, waiting ${RETRY_WAIT}s...${RESET}"
+    sleep "$RETRY_WAIT"
+
+    STILL=()
+    RECOVERED=0
+    for i in "${PENDING[@]}"; do
+        IP_PPP=$(get_ppp_ip "ppp$i")
+        if is_valid_ppp_ip "$IP_PPP"; then
+            if configure_session "$i" "$IP_PPP"; then
+                RECOVERED=$((RECOVERED + 1))
+            else
+                FAILED_IDX+=("$i")
+            fi
+        else
+            # pppd mort ? on le relance (une session à la fois, doucement)
+            if ! ppp_session_running "$i"; then
+                pppd call "pppoe$i" >/dev/null 2>&1 &
+                sleep "$START_DELAY"
+            fi
+            STILL+=("$i")
+        fi
+    done
+
+    echo -e "  -> recovered: ${GREEN}${RECOVERED}${RESET}, still pending: ${YELLOW}${#STILL[@]}${RESET}"
+    PENDING=("${STILL[@]}")
+    ROUND=$((ROUND + 1))
+done
+
+# Celles qui n'ont jamais marché : on arrête pppd (pas de spam vers le FAI)
+for i in "${PENDING[@]}"; do
+    stop_ppp_session "$i"
+    FAILED_IDX+=("$i")
+done
+
 echo
 echo -e "PPPoE sessions established: ${GREEN}${PH2_OK}${RESET} / ${COUNT}"
 
@@ -461,7 +536,7 @@ if [ "${#FAILED_IDX[@]}" -gt 0 ]; then
     echo -e "${YELLOW}Reasons found in pppd logs:${RESET}"
     for i in "${FAILED_IDX[@]}"; do
         grep -hoiE "Timeout waiting for PAD[OS] packets|PAP authentication failed|CHAP authentication failed|Generic-Error.*|AC-System-Error.*|Service-Name-Error.*|No response to [0-9]+ echo-requests|LCP: timeout.*|Connection terminated|Modem hangup" \
-            "/var/log/pppoe_${i}.log" 2>/dev/null | head -n1 || echo "(no clear reason in log)"
+            "/var/log/pppoe_${i}.log" 2>/dev/null | tail -n1 || echo "(no clear reason in log)"
     done | sort | uniq -c | sort -rn
     echo
 fi
